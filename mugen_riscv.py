@@ -245,6 +245,7 @@ if __name__ == "__main__":
     parser.add_argument('-a','--analyze',action='store_true',help='Analyze missing testcases')
     parser.add_argument('-g','--generate',action='store_true',help='Generate testsuite json after running test')
     parser.add_argument('-f',metavar='test_suite',help='Specify testsuite',dest='test_suite',default=None)
+    parser.add_argument('-o','--output_dir',type=str,default='',help='Specity the dir to store the logs')
     parser.add_argument('-x',action='store_true',help='-x parameter')
     parser.add_argument('--addDisk',action='store_true')
     parser.add_argument('--multiMachine',action='store_true')
@@ -282,4 +283,9 @@ if __name__ == "__main__":
             if args.generate == True:
                 gen = SuiteGenerator()
                 gen.GenJson(test_res)
+        if args.output_dir != '':
+            os.system('ls logs_failed && /bin/cp -rf logs '+args.output_dir)
+            os.system('ls logs_failed && /bin/cp -rf logs_failed '+args.output_dir)
+            os.system('ls suite2cases_out && /bin/cp -rf suite2cases_out '+args.output_dir)
+            os.system('ls exec.log && /bin/cp -rf exec.log '+args.output_dir)
 
