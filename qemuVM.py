@@ -8,7 +8,7 @@ class QemuVM(object):
     def __init__(self, vcpu,memory,workingDir,bkfile,
                  kernel,bios,initrd,arch='riscv64',
                  id=1,user='root',password='openEuler12#$',
-                 path='/root/GitRepo/mugen-riscv' , restore=True,sharedir='',
+                 path='/root/mugen' , restore=True,sharedir='',
                  qemuOption=''):
         self.id = id
         self.port , self.ip , self.user , self.password  = None , '127.0.0.1' , user , password
@@ -52,6 +52,13 @@ class QemuVM(object):
         conn.connect(self.ip,self.port,self.user,self.password,timeout=timeout,allow_agent=False,look_for_keys=False)
         sftp.psftp_get(conn,remotedir,remotefile,localdir)
 
+    def sftp_put(self,localdir,localfile,remotedir,timeout=5):
+        conn = paramiko.SSHClient()
+        conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
+        conn.connect(self.ip,self.port,self.user,self.password,timeout=timeout,allow_agent=False,look_for_keys=False)
+        sftp.psftp_put(conn,localdir,localfile,remotedir)
+
+
     def start(self , disk=[] , machine=1 , tap_number=0 , taplist=[]):
         self.tapls = taplist
         self.port = self.findAvalPort(1)[0]
@@ -78,15 +85,14 @@ class QemuVM(object):
                    '-nographic' , 
                    '-smp' ,  str(self.vcpu) ,  '-m' , str(self.memory)+'G',
                    '-object' , 'rng-random,filename=/dev/urandom,id=rng0',
-                   '-device' , 'virtio-rng-device,rng=rng0' ]
+                   '-device' , 'virtio-rng-pci,rng=rng0' ]
 
         ## specity the drive file
         cmdlist.append('-drive')
         if self.restore:
-            cmdlist.append("file="+self.workingDir+self.drive+",format=qcow2,id=hd0")
+            cmdlist.append("file="+self.workingDir+self.drive+",format=qcow2,if=virtio,id=hd0")
         else:
-            cmdlist.append("file="+self.workingDir+self.bkFile+",format=qcow2,id=hd0")  
-        cmdlist.extend(['-device' , 'virtio-blk-device,drive=hd0'])
+            cmdlist.append("file="+self.workingDir+self.bkFile+",format=qcow2,if=virtio,id=hd0")  
 
 
         ## specity the bootloader option
@@ -103,37 +109,37 @@ class QemuVM(object):
             cmdlist.extend(['-initrd' , self.workingDir+self.initrd])
 
         ## specity the append option
-        if self.sharedir != '':
+        if self.sharedir != '' and self.arch == 'riscv64':
             shared_path=self.workingDir+self.sharedir+str(self.id)
             os.system("mkdir "+shared_path)
             cmdlist.extend(["-virtfs" , "local,id=test,path="+shared_path+",security_model=none,mount_tag=test"])
 
         if len(disk) > 0:
             for i in range(len(disk)):
-                cmdlist.extend(["-drive", "file="+self.workingDir+"disk"+str(self.id)+'-'+str(i+1)+".qcow2,format=qcow2,id=hd"+str(i+1), 
-                               "-device" ,  "virtio-blk-pci,drive=hd"+str(i+1)])
+                cmdlist.extend(["-drive", "file="+self.workingDir+"disk"+str(self.id)+'-'+str(i+1)+".qcow2,format=qcow2,if=virtio,id=hd"+str(i+1)])
 
         if tap_number > 0:
             for i in range(tap_number-1):
                 used_tap = taplist[i]
                 cmdlist.extend(["-netdev","tap,id=net"+used_tap+",ifname="+used_tap+",script=no,downscript=no",
-                                "-device", "virtio-net-device,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(self.mac+i+1)])
+                                "-device", "virtio-net-pci,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(self.mac+i+1)])
             if machine > 1:
                 used_tap = taplist[-1]
                 cmdlist.extend(["-netdev", "tap,id=net"+used_tap+",ifname="+used_tap+",script=no,downscript=no",
-                                "-device", "virtio-net-device,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(self.mac)])
+                                "-device", "virtio-net-pci,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(self.mac)])
 
         ssh_port=self.port
         cmdlist.extend(["-netdev" , "user,id=usernet,hostfwd=tcp::"+str(ssh_port)+"-:22",
-                        "-device" , "virtio-net-device,netdev=usernet,mac=52:54:00:11:45:{:0>2d}".format(self.mac+tap_number)])
+                        "-device" , "virtio-net-pci,netdev=usernet,mac=52:54:00:11:45:{:0>2d}".format(self.mac+tap_number)])
         
         if self.qemu_option is not None:
             cmdlist.append(self.qemu_option)
+            
         cmd = " ".join(cmdlist)
         self.process = subprocess.Popen(args=cmd,stderr=subprocess.PIPE,stdout=subprocess.PIPE,stdin=subprocess.PIPE,encoding='utf-8',shell=True)
 
     def sharedReady(self):
-        if self.sharedir != '':
+        if self.sharedir != '' and self.arch == 'riscv64':
             while not os.path.exists(self.workingDir+self.sharedir+str(self.id)+'/shared_ready'):
                 time.sleep(5)
             os.system('rm -rf '+self.workingDir+self.sharedir+'/shared_ready')

@@ -29,10 +29,10 @@ def lstat(qemuVM:QemuVM,remotepath,timeout=5):
 
 def copydown(copydir , copyfile='' , localdir = '.',timeout=5) -> bool :
     if copyfile == '':
-        target = qemuVM.workingDir+copydir
+        target = copydir
     else:
-        target = os.path.join(qemuVM.workingDir+copydir,copyfile)
-    os.system('ls '+localdir+' || mkdir '+localdir)
+        target = os.path.join(copydir,copyfile)
+    os.system('ls '+localdir+' >/dev/null || mkdir -p '+localdir)
     t_end = time.time() + timeout
     while time.time() < t_end:
         if os.path.exists(target):
@@ -43,8 +43,8 @@ def copydown(copydir , copyfile='' , localdir = '.',timeout=5) -> bool :
 
 def runTest(qemuVM:QemuVM , testsuite , runArgs):
     if not qemuVM.isBroken():
-        print(qemuVM.ssh_exec('cd '+qemuVM.path+' \n \
-                               echo \''+testsuite+'\' > list_temp \n \
+        print(qemuVM.ssh_exec('cd '+qemuVM.path+' ; \
+                               echo \''+testsuite+'\' > list_temp ; \
                                python3 mugen_riscv.py -l list_temp '+runArgs,timeout=60)[1])
         if not copydown(qemuVM.workingDir+qemuVM.sharedir+'/logs_failed' , '' , qemuVM.workingDir):
             if lstat(qemuVM,qemuVM.path+'/logs_failed') is not None:
@@ -55,7 +55,7 @@ def runTest(qemuVM:QemuVM , testsuite , runArgs):
         if not copydown(qemuVM.workingDir+qemuVM.sharedir+'/suite2cases_out' , '' , qemuVM.workingDir):
             if lstat(qemuVM,qemuVM.path+'/suite2cases_out') is not None:
                 qemuVM.sftp_get(qemuVM.path+'/suite2cases_out','',qemuVM.workingDir)
-        if not copydown(qemuVM.workingDir+qemuVM.output+'/exec.log' , '' , qemuVM.workingDir+'exec_log/'+testsuite):
+        if not copydown(qemuVM.workingDir+qemuVM.sharedir , 'exec.log' , qemuVM.workingDir+'exec_log/'+testsuite):
             qemuVM.sftp_get(qemuVM.path,'/exec.log',qemuVM.workingDir+'exec_log/'+testsuite)
         
 
@@ -300,6 +300,7 @@ if __name__ == "__main__":
     parser.add_argument('--qemu_option',type=str,default='',help='qemu option in command line')
     parser.add_argument('-a',type=str,default='riscv64',help='specity the qemu arch')
     parser.add_argument('-initrd',type=str,help='Specity the initrd file')
+    parser.add_argument('--mirror',type=str,default='https://gitee.com/openeuler/mugen.git',help='Specity the mugen mirror')
     parser.add_argument('-F',type=str,help='Specify test config file')
     args = parser.parse_args()
 
@@ -321,6 +322,7 @@ if __name__ == "__main__":
     qemu_option , qemu_arch = '' , 'riscv64'
     bridge_ip = None
     tap = Queue()
+    mirror='https://gitee.com/openeuler/mugen.git'
     
 
     # parse arguments
@@ -372,7 +374,19 @@ if __name__ == "__main__":
             runningArg += " -x"
         if configData.__contains__('bridge ip'):
             bridge_ip = configData['bridge ip']
-        if configData.__contains__('tap num'):
+        if configData.__contains__('bios') and type(configData['bios']) == str:
+            bios = configData['bios']
+        if configData.__contains__('kernel') and type(configData['kernel']) == str:
+            kernel = configData['kernel']
+        if configData.__contains__('qemu option') and type(configData['qemu option'])==str:
+            qemu_option = configData['qemu option']
+        if configData.__contains__('qemu arch') and type(configData['qemu arch'])==str:
+            qemu_arch = configData['qemu arch']
+        if configData.__contains__('initrd') and type(configData['initrd'])==str:
+            initrd = configData['initrd']
+        if configData.__contains__('mirror') and type(configData['mirror']) == str:
+            mirror = configData['mirror']
+        if configData.__contains__('tap num') and type(configData['tap num'])==int:
             for i in range(configData['tap num']):
                 tap.put('tap'+str(i))
         if configData.__contains__('workingDir') and (configData.__contains__('bios') or configData.__contains__('kernel')) and configData.__contains__('drive'):
@@ -386,16 +400,6 @@ if __name__ == "__main__":
             else:
                 print('Invalid drive file!')
                 exit(-1)
-            if configData.__contains__('bios') and type(configData['bios']) == str:
-                bios = configData['bios']
-            if configData.__contains__('kernel') and type(configData['kernel']) == str:
-                kernel = configData['kernel']
-            if configData.__contains__('qemu option') and type(configData['qemu option'])==str:
-                qemu_option = configData['qemu option']
-            if configData.__contains__('qemu arch') and type(configData['qemu arch'])==str:
-                qemu_arch = configData['qemu arch']
-            if configData.__contains__('initrd') and type(configData['initrd'])==str:
-                qemu_arch = configData['initrd']
             if configData.__contains__('mugenDir'):
                 preImg = False
                 bkFile = orgDrive
@@ -408,7 +412,7 @@ if __name__ == "__main__":
             else:
                 preImg = True
                 bkFile = img_base
-                mugenPath = "/root/GitRepo/mugen-riscv"
+                mugenPath = "/root/mugen"
                 if configData.__contains__('listFile') and type(configData['listFile']) == str:
                     list_file = configData['listFile']
                     genList = False
@@ -450,7 +454,10 @@ if __name__ == "__main__":
             runningArg += ' -g'
         if args.detailed:
             runningArg += ' -x'      
-        bridge_ip = args.bridge_ip
+        if args.bridge_ip:
+            bridge_ip = args.bridge_ip
+        if args.mirror:
+            mirror = args.mirror
         if args.t > 0:
             for i in range(args.t):
                 tap.put('tap'+str(i))
@@ -478,7 +485,7 @@ if __name__ == "__main__":
             else:
                 preImg = True
                 bkFile = img_base
-                mugenPath = "/root/GitRepo/mugen-riscv"
+                mugenPath = "/root/mugen"
                 if args.list_file != None:
                     list_file = args.list_file
                     genList = False
@@ -499,14 +506,17 @@ if __name__ == "__main__":
                        kernel=kernel,bios=bios,initrd=initrd,
                        vcpu=coreNum,memory=memSize,
                        path=mugenPath,workingDir=workingDir,bkfile=bkFile,restore=False,
-                       qemuOption=qemu_option,arch=qemu_arch)
+                       qemuOption=qemu_option,arch=qemu_arch,sharedir='shared')
         preVM.start()
         preVM.waitReady()
         if preImg == True:
-            print(preVM.ssh_exec('dnf install git',timeout=120)[1])
-            print(preVM.ssh_exec('cd /root \n mkdir GitRepo \n cd GitRepo \n git clone https://github.com/brsf11/mugen-riscv.git',timeout=600)[1])
-            print(preVM.ssh_exec('cd /root/GitRepo/mugen-riscv \n bash dep_install.sh',timeout=300)[1])
-            print(preVM.ssh_exec('cd /root/GitRepo/mugen-riscv \n bash mugen.sh -c --port 22 --user root --password openEuler12#$ --ip 127.0.0.1 2>&1',timeout=300)[1])
+            print(preVM.ssh_exec('dnf install git -y',timeout=120)[1])
+            print(preVM.ssh_exec('cd /root \n \
+                                  git clone '+mirror,timeout=600)[1])
+            print(preVM.ssh_exec('cd /root/mugen \n \
+                                  bash dep_install.sh',timeout=300)[1])
+            print(preVM.ssh_exec('cd /root/mugen \n \
+                                  bash mugen.sh -c --port 22 --user root --password openEuler12#$ --ip 127.0.0.1 2>&1',timeout=300)[1])
             file=preVM.ssh_exec("if test -f /etc/rc.local; then \
                                     echo '/etc/rc.local';\
                                  elif test -f /etc/rc.d/rc.local; then \
@@ -521,6 +531,8 @@ if __name__ == "__main__":
             preVM.ssh_exec('echo "chmod 1777 /root/shared" >> '+file)
             preVM.ssh_exec('echo "touch /root/shared/shared_ready" >> '+file)
             preVM.ssh_exec('chmod a+x '+file)
+            if lstat(preVM , '/root/mugen/mugen_riscv.py') is None:
+                preVM.sftp_put('.' , 'mugen_riscv.py' , '/root/mugen')
 
         if genList is True:
             preVM.ssh_exec('dnf list | grep -E \'riscv64|noarch\' > pkgs.txt',timeout=120)
