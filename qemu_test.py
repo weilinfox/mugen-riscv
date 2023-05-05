@@ -199,7 +199,7 @@ class Dispatcher(Thread):
                                     self.attachVM[i-1].conftap(br_ip = self.br_ip)
                                 self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
                                 try:
-                                    runTest(self.qemuVM , self.initTarget[0] , self.runArg)
+                                    runTest(self.qemuVM , target[0] , self.runArg)
                                 except:
                                     mugen_log.logging("ERROR" , "run test "+self.initTarget[0]+" false")
                                 self.qemuVM.destroy()
@@ -611,7 +611,7 @@ if __name__ == "__main__":
                         except:
                             isEnd = True
                         else:
-                            dispathcers[i] = Dispatcher(qemuVM = qemuVM[i],targetQueue=targetQueue,initTarget=target , tapQueue=tap , br_ip=bridge_ip , step=threadNum)
+                            dispathcers[i] = Dispatcher(qemuVM = qemuVM[i],targetQueue=targetQueue,initTarget=target , tapQueue=tap , br_ip=bridge_ip , step=threadNum , runArg=runningArg)
                             dispathcers[i].start()
             isAlive = False
             for i in range(threadNum):
