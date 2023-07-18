@@ -311,7 +311,7 @@ if __name__ == "__main__":
     # set default values
     threadNum = 1
     coreNum , memSize = 4 , 4
-    runningArg = ' -o /root/shared'
+    runningArg = ''
     mugenNative , generateJson , preImg , genList = False , False , False , False
     list_file , workingDir , bkFile , orgDrive , mugenPath = None , None , None , None , None
     kernel , bios , initrd = None , None , None
@@ -557,6 +557,8 @@ if __name__ == "__main__":
         preVM.destroy()
         preVM.waitPoweroff()
 
+    if qemu_arch == 'riscv64':
+        runningArg += ' -o /root/shared'
 
 
     if list_file is not None:
