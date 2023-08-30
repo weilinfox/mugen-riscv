@@ -1,3 +1,4 @@
+import traceback
 from dataclasses import replace
 import os
 import sys
@@ -5,13 +6,153 @@ import argparse
 from socket import timeout
 import time
 import paramiko
+import curses
+import fcntl
 from mugen_riscv import TestEnv,TestTarget
 from queue import Queue
 from libs.locallibs import sftp,ssh_cmd
 from threading import Thread
 import threading
 import subprocess
+import signal
 import json
+
+
+class screen:
+    def __init__(self):
+        self.scr_col = 90
+        self.scr_row = 50
+        self.scr_buf_len = 4096
+        self.scr_buf = ["" for i in range(self.scr_row)]
+        self.std_in = ""
+        self.status = "init"
+        self.stdout = None
+        self.stderr = None
+        self.prtlock = threading.Lock()
+
+    def getchar(self):
+        inp = self.std_scr.getch()
+        ret = None
+        if inp == curses.ERR:
+            # self.std_scr.addstr(self.scr_row, 0, "No input")
+            pass
+        elif inp == curses.KEY_RESIZE:
+            self.scr_row, self.scr_col = self.std_scr.getmaxyx()
+            self.scr_row -= 1
+            self.std_scr.clear()
+            self.print("")
+            self.std_scr.addstr(self.scr_row, 0, "resize    ")
+        else:
+            self.std_scr.addstr(self.scr_row, 0, str(inp) + "         ")
+        if inp >= 32 and inp < 127:
+            self.std_in += chr(inp)
+        elif inp == ord('\n'):
+            ret = self.std_in + "\n"
+            self.std_in = ""
+        elif inp == curses.KEY_BACKSPACE:
+            self.std_in = self.std_in[:-1]
+
+        out_str = self.status + "> " + self.std_in
+        if len(out_str) >= self.scr_col:
+            self.std_scr.addstr(self.scr_row - 1, 0, out_str[len(out_str) - self.scr_col + 1:])
+        else:
+            self.std_scr.addstr(self.scr_row - 1, 0, out_str + " " * (self.scr_col - len(out_str) - 1))
+        self.std_scr.refresh()
+
+        return ret
+
+    def println(self, text):
+        if text is None:
+            return
+        elif type(text) != str:
+            text = str(text)
+        self.print(str(text) + "\n")
+
+    def print(self, text):
+        if text is None:
+            return
+        elif type(text) != str:
+            text = str(text)
+        with self.prtlock:
+            for c in text:
+                co = ord(c)
+                if co >= 32 and co < 127:
+                    self.scr_buf[-1] += c
+                elif co == ord('\r'):
+                    pass
+                elif co == ord('\t'):
+                    pass
+                elif co == ord('\n'):
+                    self.scr_buf.append("")
+
+                while len(self.scr_buf[-1]) >= self.scr_col:
+                    self.scr_buf.append(self.scr_buf[-1][self.scr_col:])
+                    self.scr_buf[-2] = self.scr_buf[-2][:self.scr_col]
+                if len(self.scr_buf) > self.scr_buf_len:
+                    self.scr_buf = self.scr_buf[len(self.scr_buf)-self.scr_buf_len:]
+
+            try:
+                for i in range(1, self.scr_row):
+                    out = self.scr_buf[i-self.scr_row] + " " * (self.scr_col - len(self.scr_buf[i-self.scr_row]))
+                    self.std_scr.addstr(i-1, 0, out[:min(self.scr_col, len(out))])
+            except:
+                exit_app(-1, traceback.format_stack())
+            self.std_scr.refresh()
+
+    def print_setup(self, scrout):
+        if self.stdout is None:
+            self.stdout, sys.stdout = sys.stdout, scrout
+            self.stderr = sys.stderr
+            sys.stderr = sys.stdout
+
+    def print_restore(self):
+        if self.stdout is not None:
+            sys.stdout, sys.stderr = self.stdout, self.stderr
+            self.stdout, self.stderr = None, None
+
+    def start(self):
+        self.std_scr = curses.initscr()
+        self.status = "command"
+        curses.noecho()
+        curses.cbreak()
+        self.std_scr.keypad(True)
+        self.std_scr.nodelay(True)
+        curses.curs_set(0)
+
+        self.std_scr.clear()
+        # self.std_scr.border(0)
+        self.scr_row, self.scr_col = self.std_scr.getmaxyx()
+        self.scr_row -= 1
+        self.scr_buf = ["" for i in range(self.scr_row)]
+        self.std_scr.resize(self.scr_row + 1, self.scr_col)
+        self.std_scr.refresh()
+
+    def end(self):
+        self.print_restore()
+        if self.status != "init":
+            curses.nocbreak()
+            self.std_scr.keypad(False)
+            curses.echo()
+            curses.endwin()
+
+
+class screen_out:
+    def __init__(self, stdscr):
+        self.stdscr = stdscr
+
+    def write(self, text):
+        self.stdscr.print(text)
+        return len(text)
+
+
+stdscr = screen()
+
+
+def exit_app(code, msg):
+    stdscr.end()
+    print(msg)
+    exit(code)
+
 
 def ssh_exec(qemuVM,cmd,timeout=5):
     conn = paramiko.SSHClient()
@@ -303,6 +444,7 @@ class QemuVM(object):
         self.runArgs = runArgs
         self.mac = id+1
         self.tapls = []
+        self.fkill = False
         if self.workingDir[-1] != '/':
             self.workingDir += '/'
 
@@ -312,7 +454,7 @@ class QemuVM(object):
         if self.drive in os.listdir(self.workingDir):
             os.system('rm -f '+self.workingDir+self.drive)
         if self.restore:
-            cmd = 'qemu-img create -f qcow2 -F qcow2 -b '+self.workingDir+self.bkFile+' '+self.workingDir+self.drive
+            cmd = 'qemu-img create -f qcow2 -F qcow2 -b '+self.workingDir+self.bkFile+' '+self.workingDir+self.drive+'> /dev/null'
             res = os.system(cmd)
             if res != 0:
                 print('Failed to create cow img: '+self.drive)
@@ -320,7 +462,7 @@ class QemuVM(object):
         os.system('rm -f '+self.workingDir+'disk'+str(self.id)+'-*')
         if disk > 1:
             for i in range(1 , disk):
-                cmd = 'qemu-img create -f qcow2 '+self.workingDir+"disk"+str(self.id)+'-'+str(i)+'.qcow2 500M'
+                cmd = 'qemu-img create -f qcow2 '+self.workingDir+"disk"+str(self.id)+'-'+str(i)+'.qcow2 500M'+'> /dev/null'
                 res = os.system(cmd)
                 if res != 0:
                     print('Failed to create img: disk'+str(id)+'-'+str(i))
@@ -403,7 +545,9 @@ class QemuVM(object):
 
         cmd += "-netdev user,id=usernet,hostfwd=tcp::" + str(ssh_port) + "-:22 -device virtio-net-pci,netdev=usernet,mac=52:54:00:11:45:{:0>2d}".format(self.mac)
         self.process = subprocess.Popen(args=cmd,stderr=subprocess.PIPE,stdout=subprocess.PIPE,stdin=subprocess.PIPE,encoding='utf-8',shell=True)
-        time.sleep(1)
+        fcntl.fcntl(self.process.stdout, fcntl.F_SETFL, fcntl.fcntl(self.process.stdout, fcntl.F_GETFL) | os.O_NONBLOCK)
+        fcntl.fcntl(self.process.stderr, fcntl.F_SETFL, fcntl.fcntl(self.process.stderr, fcntl.F_GETFL) | os.O_NONBLOCK)
+        time.sleep(0.1)
         ret = self.process.poll()
         if ret is not None:
             print("Qemu process terminate unexpectedly " + str(ret))
@@ -413,7 +557,8 @@ class QemuVM(object):
 
     def waitReady(self):
         conn = 519
-        while conn == 519:
+        pret = self.process.poll()
+        while conn == 519 and pret is None:
             conn = paramiko.SSHClient()
             conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
             try:
@@ -421,7 +566,7 @@ class QemuVM(object):
                 conn.connect(self.ip, self.port, self.user, self.password, timeout=5)
             except Exception as e:
                 conn = 519
-        if conn != 519:
+        if conn != 519 and pret is None:
             conn.close()
 
     def conftap(self , br_ip , tapnode=None):
@@ -471,11 +616,18 @@ class QemuVM(object):
 
     def destroy(self):
         ssh_exec(self,'poweroff')
+        if self.fkill:
+            return
         if self.restore:
             os.system('rm -f '+self.workingDir+self.drive)
         os.system('rm -f '+self.workingDir+'disk'+str(self.id)+'-*')
         if self.pflash is not None:
             os.system("rm -f "+self.npflash)
+
+    def kill(self):
+        if self.process is not None and self.process.poll() is None:
+            self.fkill = True
+            self.process.kill()
 
 
 if __name__ == "__main__":
@@ -505,6 +657,7 @@ if __name__ == "__main__":
     parser.add_argument('--bridge_ip', type=str, help='Specify the network bridge ip')
     parser.add_argument('-t', type=int, default=0, help='Specify the number of generated free tap')
     parser.add_argument('-F',type=str,help='Specify test config file')
+    parser.add_argument('--cmd',action='store_true',help='Launch command interface')
     args = parser.parse_args()
 
     test_env = TestEnv()
@@ -525,7 +678,7 @@ if __name__ == "__main__":
     addDisk, multiMachine, addNic = False,False,False
     bridge_ip = None
     tap = Queue()
-    
+
 
     # parse arguments
     if args.F is not None:
@@ -535,32 +688,27 @@ if __name__ == "__main__":
             if type(configData['threads']) == int and configData['threads'] > 0:
                 threadNum = configData['threads']
             else:
-                print('Thread number is invalid!')
-                exit(-1)
+                exit_app(-1, 'Thread number is invalid!')
         if configData.__contains__('cores'):
             if type(configData['cores']) == int and configData['cores'] > 0:
                 coreNum = configData['cores']
             else:
-                print('Core number is invalid!')
-                exit(-1)
+                exit_app(-1, 'Core number is invalid!')
         if configData.__contains__('memory'):
             if type(configData['memory']) == int and configData['memory'] > 0:
                 memSize = configData['memory']
             else:
-                print('Memory size is invalid!')
-                exit(-1)
+                exit_app(-1, 'Memory size is invalid!')
         if configData.__contains__('user'):
             if type(configData['user']) == str:
                 user = configData['user']
             else:
-                print('user is invalid!')
-                exit(-1)
+                exit_app(-1, 'user is invalid!')
         if configData.__contains__('password'):
             if type(configData['password']) == str:
                 password = configData['password']
             else:
-                print('password is invalid!')
-                exit(-1)
+                exit_app(-1, 'password is invalid!')
         if configData.__contains__('addDisk') and configData['addDisk'] == 1:
             runningArg += " --addDisk"
         if configData.__contains__('multiMachine') and configData['multiMachine'] == 1:
@@ -582,19 +730,16 @@ if __name__ == "__main__":
         if configData.__contains__('qemuArch') and type(configData['qemuArch']) == str:
             arch = configData['qemuArch']
             if arch not in ['riscv64', 'x86_64']:
-                print("Unsupported qemu architecture " + arch)
-                exit(-1)
+                exit_app(-1, "Unsupported qemu architecture " + arch)
         if configData.__contains__('workingDir') and (configData.__contains__('bios') or configData.__contains__('kernel') or configData.__contains__('pflash')) and configData.__contains__('drive'):
             if type(configData['workingDir']) == str:
                 workingDir = configData['workingDir']
             else:
-                print('Invalid working directory!')
-                exit(-1)
+                exit_app(-1, 'Invalid working directory!')
             if type(configData['drive']) == str:
                 orgDrive = configData['drive']
             else:
-                print('Invalid drive file!')
-                exit(-1)
+                exit_app(-1, 'Invalid drive file!')
             if configData.__contains__('bios') and type(configData['bios']) == str:
                 bios = configData['bios']
             if configData.__contains__('pflash') and type(configData['pflash']) == str:
@@ -624,24 +769,20 @@ if __name__ == "__main__":
                 else:
                     genList = True
         else:
-            print('Please specify working directory and bios or kernel and drive file!')
-            exit(-1)
+            exit_app(-1, 'Please specify working directory and bios or kernel and drive file!')
     else:
         if args.x > 0:
             threadNum = args.x
         else:
-            print('Thread number is invalid!')
-            exit(-1)
+            exit_app(-1, 'Thread number is invalid!')
         if args.c > 0:
             coreNum = args.c
         else:
-            print('Core number is invalid!')
-            exit(-1)
+            exit_app(-1, 'Core number is invalid!')
         if args.M > 0:
             memSize = args.M
         else:
-            print('Memory size is invalid!')
-            exit(-1)
+            exit_app(-1, 'Memory size is invalid!')
         if args.user is not None:
             user = args.user
         if args.password is not None:
@@ -692,15 +833,19 @@ if __name__ == "__main__":
                 else:
                     genList = True
         else:
-            print('Please specify working directory and bios or kernel and drive file!')
-            exit(-1)
+            exit_app(-1, 'Please specify working directory and bios or kernel and drive file!')
+
+    if args.cmd:
+        print("Start command interface")
+        time.sleep(1)
+        stdscr.start()
+        stdscr.print_setup(screen_out(stdscr))
 
     if preImg == True or genList == True:
         if preImg == True and (bkFile not in os.listdir(workingDir)):
-            res = os.system('qemu-img create -f qcow2 -F qcow2 -b '+workingDir+orgDrive+' '+workingDir+bkFile)
+            res = os.system('qemu-img create -f qcow2 -F qcow2 -b '+workingDir+orgDrive+' '+workingDir+bkFile+'> /dev/null')
             if res != 0:
-                print('Failed to create img-base')
-                exit(-1)
+                exit_app(-1, 'Failed to create img-base')
 
         preVM = QemuVM(id=1, port=findAvalPort(1)[0], user=user, password=password, arch=arch, kernel=kernel, kparms=kparms, initrd=initrd, bios=bios, pflash=pflash,
                        vcpu=coreNum, memory=memSize, path=mugenPath, workingDir=workingDir, bkfile=bkFile,
@@ -778,16 +923,27 @@ if __name__ == "__main__":
             dispathcers[i].start()
             time.sleep(0.5)
 
+        def break_all(signum, frame):
+            print("Kill all qemu processes")
+            for i in range(threadNum):
+                if not dispathcers[i].is_alive():
+                    while len(dispathcers[i].attachVM) > 0:
+                        dispathcers[i].attachVM[-1].kill()
+                        dispathcers[i].attachVM.pop()
+            exit_app(0, "Keyboard interrupt")
+
+        signal.signal(signal.SIGINT, break_all)
+
         isAlive = True
         isEnd = False
         while isAlive:
+            if args.cmd:
+                stdscr.getchar()
             tempAlive = []
             for i in range(threadNum):
                 if dispathcers[i].is_alive():
-                    print('Thread '+str(i)+' is alive')
                     tempAlive.append(True)
                 else:
-                    print('Thread '+str(i)+' is dead')
                     while len(dispathcers[i].attachVM) > 0:
                         dispathcers[i].attachVM[-1].destroy()
                         dispathcers[i].attachVM[-1].waitPoweroff()
@@ -808,8 +964,11 @@ if __name__ == "__main__":
             isAlive = False
             for i in range(threadNum):
                 isAlive |= tempAlive[i]
-            time.sleep(5)
+            time.sleep(0.01)
     
     if genList is True:
         os.system('rm -f list')
-            
+
+    if args.cmd:
+        stdscr.print_restore()
+        stdscr.end()
