@@ -56,7 +56,7 @@ def runTest(qemuVM:QemuVM , testsuite , runArgs):
             if lstat(qemuVM,qemuVM.path+'/suite2cases_out') is not None:
                 qemuVM.sftp_get(qemuVM.path+'/suite2cases_out','',qemuVM.workingDir)
         if not copydown(qemuVM.workingDir+qemuVM.sharedir , 'exec.log' , qemuVM.workingDir+'exec_log/'+testsuite):
-            qemuVM.sftp_get(qemuVM.path,'/exec.log',qemuVM.workingDir+'exec_log/'+testsuite)
+            qemuVM.sftp_get(qemuVM.path,'exec.log',qemuVM.workingDir+'exec_log/'+testsuite)
         
 
 class Dispatcher(Thread):
@@ -74,204 +74,62 @@ class Dispatcher(Thread):
     def run(self):
         notEmpty = True
         while notEmpty:
+            target = None
             if self.initTarget is not None:
-                tapnum = 0
-                if self.initTarget[2] > 1 and self.runArg.find('multiMachine') != -1:
-                    if self.initTarget[3] > 1 and self.runArg.find('addNic') != -1:
-                        tapnum = self.initTarget[2]*(self.initTarget[3]+1)
-                        if tapnum > self.tapQueue.qsize():
-                            self.targetQueue.put(self.initTarget)
-                        else:
-                            self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3]+1,taplist=[self.tapQueue.get() for i in range(self.initTarget[3]+1)])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            for i in range(1 , self.initTarget[2]):
-                                self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                            user=self.qemuVM.user , password=self.qemuVM.password,
-                                                            kernel=self.qemuVM.kernel , bios=self.qemuVM.bios ,  initrd=self.qemuVM.initrd,
-                                                            arch=self.qemuVM.arch , qemuOption=self.qemuVM.qemu_option,
-                                                            workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path,
-                                                            ))
-                                self.attachVM[i-1].start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3]+1,taplist=[self.tapQueue.get() for i in range(self.initTarget[3]+1)])
-                                self.attachVM[i-1].waitReady()
-                                self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                            self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(self.initTarget[2]-1)])
-                            try:
-                                runTest(self.qemuVM , self.initTarget[0] , self.runArg)
-                            except:
-                                mugen_log.logging("ERROR" , "run test "+self.initTarget[0]+" false")
-                            self.qemuVM.destroy()
-                            self.qemuVM.waitPoweroff()
-                            while len(self.qemuVM.tapls) > 0:
-                                self.tapQueue.put(self.qemuVM.tapls.pop())
-                            while len(self.attachVM) > 0:
-                                self.attachVM[-1].destroy()
-                                self.attachVM[-1].waitPoweroff()
-                                while len(self.attachVM[-1].tapls) > 0:
-                                    self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                self.attachVM.pop()
-                    else:
-                        tapnum = self.initTarget[2]
-                        if tapnum > self.tapQueue.qsize():
-                            self.targetQueue.put(self.initTarget)
-                        else:
-                            self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=1,taplist=[self.tapQueue.get()])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            for i in range(1 , self.initTarget[2]):
-                                self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                            user=self.qemuVM.user , password=self.qemuVM.password,
-                                                            kernel=self.qemuVM.kernel , bios=self.qemuVM.bios ,  initrd=self.qemuVM.initrd,
-                                                            arch=self.qemuVM.arch , qemuOption=self.qemuVM.qemu_option,
-                                                            workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path,
-                                                            ))
-                                self.attachVM[i-1].start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=1,taplist=[self.tapQueue.get()])
-                                self.attachVM[i-1].waitReady()
-                                self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                            self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(self.initTarget[2]-1)])
-                            try:
-                                runTest(self.qemuVM , self.initTarget[0] , self.runArg)
-                            except:
-                                mugen_log.logging("ERROR" , "run test "+self.initTarget[0]+" false")
-                            self.qemuVM.destroy()
-                            self.qemuVM.waitPoweroff()
-                            while len(self.qemuVM.tapls) > 0:
-                                self.tapQueue.put(self.qemuVM.tapls.pop())
-                            while len(self.attachVM) > 0:
-                                self.attachVM[-1].destroy()
-                                self.attachVM[-1].waitPoweroff()
-                                while len(self.attachVM[-1].tapls) > 0:
-                                    self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                self.attachVM.pop()
-                else:
-                    if self.initTarget[3] > 1 and self.runArg.find('addNic') != -1:
-                        tapnum = self.initTarget[3]
-                        if tapnum > self.tapQueue.qsize():
-                            self.targetQueue.put(self.initTarget)
-                        else:
-                            self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3],taplist=[self.tapQueue.get() for i in range(tapnum)])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            try:
-                                runTest(self.qemuVM , self.initTarget[0] , self.runArg)
-                            except:
-                                mugen_log.logging("ERROR" , "run test "+self.initTarget[0]+" false")
-                            else:
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                            while len(self.qemuVM.tapls) > 0:
-                                self.tapQueue.put(self.qemuVM.tapls.pop())
-                    else:
-                        self.qemuVM.start(disk=self.initTarget[1])
-                        self.qemuVM.sharedReady()
-                        self.qemuVM.waitReady()
-                        try:
-                            runTest(self.qemuVM , self.initTarget[0] , self.runArg)
-                        except:
-                            mugen_log.logging("ERROR" , "run test "+self.initTarget[0]+" false")
-                        self.qemuVM.destroy()
-                        self.qemuVM.waitPoweroff()
+                target = self.initTarget
                 self.initTarget = None
             else:
                 try:
                     target = self.targetQueue.get(block=True,timeout=2)
                 except:
-                    notEmpty = False
+                    break
+
+            tapnum , eachnum = 0 , 0
+            if target[2] > 1 and self.runArg.find('multiMachine') != -1:
+                if target[3] > 0 and self.runArg.find('addNic') != -1:
+                    tapnum = target[2]*(target[3]+1)
+                    eachnum = target[3]+1
                 else:
-                    if target[2] > 1 and self.runArg.find('multiMachine') != -1:
-                        if target[3] > 1 and self.runArg.find('addNic') != -1:
-                            tapnum = target[2]*(target[3]+1)
-                            if tapnum > self.tapQueue.qsize():
-                                self.targetQueue.put(target)
-                            else:
-                                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=target[3]+1,taplist=[self.tapQueue.get() for i in range(target[3]+1)])
-                                self.qemuVM.sharedReady()
-                                self.qemuVM.waitReady()
-                                for i in range(1 , target[2]):
-                                    self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                            user=self.qemuVM.user , password=self.qemuVM.password,
-                                                            kernel=self.qemuVM.kernel , bios=self.qemuVM.bios ,  initrd=self.qemuVM.initrd,
-                                                            arch=self.qemuVM.arch , qemuOption=self.qemuVM.qemu_option,
-                                                            workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path,
-                                                            ))
-                                    self.attachVM[i-1].start(disk=target[1],machine=target[2],tap_number=target[3]+1,taplist=[self.tapQueue.get() for i in range(target[3]+1)])
-                                    self.attachVM[i-1].waitReady()
-                                    self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                                self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
-                                try:
-                                    runTest(self.qemuVM , target[0] , self.runArg)
-                                except:
-                                    mugen_log.logging("ERROR" , "run test "+self.initTarget[0]+" false")
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                                while len(self.attachVM) > 0:
-                                    self.attachVM[-1].destroy()
-                                    self.attachVM[-1].waitPoweroff()
-                                    while len(self.attachVM[-1].tapls) > 0:
-                                        self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                    self.attachVM.pop()
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                        else:
-                            tapnum = target[2]
-                            if tapnum > self.tapQueue.qsize():
-                                self.targetQueue.put(target)
-                            else:
-                                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=1,taplist=[self.tapQueue.get()])
-                                self.qemuVM.sharedReady()
-                                self.qemuVM.waitReady()
-                                for i in range(1 , target[2]):
-                                    self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                            user=self.qemuVM.user , password=self.qemuVM.password,
-                                                            kernel=self.qemuVM.kernel , bios=self.qemuVM.bios ,  initrd=self.qemuVM.initrd,
-                                                            arch=self.qemuVM.arch , qemuOption=self.qemuVM.qemu_option,
-                                                            workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path,
-                                                            ))
-                                    self.attachVM[i-1].start(disk=target[1],machine=target[2],tap_number=1,taplist=[self.tapQueue.get()])
-                                    self.attachVM[i-1].waitReady()
-                                    self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                                self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
-                                try:
-                                    runTest(self.qemuVM , target[0] , self.runArg)
-                                except:
-                                    mugen_log.logging("ERROR" , "run test "+target[0]+" false")
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                                while len(self.attachVM) > 0:
-                                    self.attachVM[-1].destroy()
-                                    self.attachVM[-1].waitPoweroff()
-                                    while len(self.attachVM[-1].tapls) > 0:
-                                        self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                    self.attachVM.pop()
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                    else:
-                        if target[3] > 1 and self.runArg.find('addNic') != -1:
-                            tapnum = target[3]
-                            if tapnum > self.tapQueue.qsize():
-                                self.targetQueue.put(target)
-                            else:
-                                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=target[3],taplist=[self.tapQueue.get() for i in range(tapnum)])
-                                self.qemuVM.sharedReady()
-                                self.qemuVM.waitReady()
-                                try:
-                                    runTest(self.qemuVM , target[0] , self.runArg)
-                                except:
-                                    mugen_log.logging("ERROR" , "run test "+target[0]+" false")
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                        else:
-                            self.qemuVM.start(target[1])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            try:
-                                runTest(self.qemuVM , target[0] , self.runArg)
-                            except:
-                                mugen_log.logging("ERROR" , "run test "+target[0]+" false")
-                            self.qemuVM.destroy()
-                            self.qemuVM.waitPoweroff()
+                    tapnum = target[2]
+                    eachnum = 1
+            else:
+                if target[3] > 0 and self.runArg.find('addNic') != -1:
+                    tapnum = target[3]
+                    eachnum = tapnum
+
+            if tapnum > self.tapQueue.qsize():
+                self.targetQueue.put(target)
+            else:
+                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=eachnum,taplist=[self.tapQueue.get() for i in range(eachnum)])
+                #self.qemuVM.sharedReady()
+                self.qemuVM.waitReady()
+                for i in range(1 , target[2]):
+                    self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
+                                                user=self.qemuVM.user , password=self.qemuVM.password,
+                                                kernel=self.qemuVM.kernel , bios=self.qemuVM.bios ,  initrd=self.qemuVM.initrd, pflash=self.qemuVM.pflash,
+                                                arch=self.qemuVM.arch , qemuOption=self.qemuVM.qemu_option,
+                                                workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path, screen=self.qemuVM.screen
+                                                ))
+                    self.attachVM[i-1].start(disk=target[1],machine=target[2],tap_number=eachnum,taplist=[self.tapQueue.get() for i in range(eachnum)])
+                    self.attachVM[i-1].waitReady()
+                    self.attachVM[i-1].conftap(br_ip = self.br_ip)
+                if target[2] > 1 and self.runArg.find('multiMachine') != -1:
+                    self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
+                try:
+                    runTest(self.qemuVM , target[0] , self.runArg)
+                except:
+                    mugen_log.logging("ERROR" , "run test "+target[0]+" false")
+                self.qemuVM.destroy()
+                self.qemuVM.waitPoweroff()
+                while len(self.qemuVM.tapls) > 0:
+                    self.tapQueue.put(self.qemuVM.tapls.pop())
+                while len(self.attachVM) > 0:
+                    self.attachVM[-1].destroy()
+                    self.attachVM[-1].waitPoweroff()
+                    while len(self.attachVM[-1].tapls) > 0:
+                        self.tapQueue.put(self.attachVM[-1].tapls.pop())
+                    self.attachVM.pop()
+            
 
 
         
@@ -288,6 +146,7 @@ if __name__ == "__main__":
     parser.add_argument('--password',type=str,default=None,help='Specify password')
     parser.add_argument('-B',type=str,help='Specify bios')
     parser.add_argument('-K',type=str,help='Specify kernel')
+    parser.add_argument('-U',type=str,help='Specify UEFI pflash')
     parser.add_argument('-D',type=str,help='Specify backing file name')
     parser.add_argument('-d',type=str,help='Specity mugen installed directory',dest='mugenDir')
     parser.add_argument('-g','--generate',action='store_true',default=False,help='Generate testsuite json after running test')
@@ -301,6 +160,7 @@ if __name__ == "__main__":
     parser.add_argument('-a',type=str,default='riscv64',help='specity the qemu arch')
     parser.add_argument('-initrd',type=str,help='Specity the initrd file')
     parser.add_argument('--mirror',type=str,default='https://gitee.com/openeuler/mugen.git',help='Specity the mugen mirror')
+    parser.add_argument('--screen',action='store_true',default=False,help='Use screen command to manage qemu processes')
     parser.add_argument('-F',type=str,help='Specify test config file')
     args = parser.parse_args()
 
@@ -314,11 +174,12 @@ if __name__ == "__main__":
     runningArg = ''
     mugenNative , generateJson , preImg , genList = False , False , False , False
     list_file , workingDir , bkFile , orgDrive , mugenPath = None , None , None , None , None
-    kernel , bios , initrd = None , None , None
+    kernel , bios , initrd , pflash = None , None , None , None
     img_base = 'img_base.qcow2'
     detailed = False
     user , password = "root","openEuler12#$"
     addDisk, multiMachine, addNic = False,False,False
+    screen = False
     qemu_option , qemu_arch = '' , 'riscv64'
     bridge_ip = None
     tap = Queue()
@@ -374,22 +235,26 @@ if __name__ == "__main__":
             runningArg += " -x"
         if configData.__contains__('bridge ip'):
             bridge_ip = configData['bridge ip']
-        if configData.__contains__('bios') and type(configData['bios']) == str:
-            bios = configData['bios']
-        if configData.__contains__('kernel') and type(configData['kernel']) == str:
-            kernel = configData['kernel']
         if configData.__contains__('qemu option') and type(configData['qemu option'])==str:
             qemu_option = configData['qemu option']
         if configData.__contains__('qemu arch') and type(configData['qemu arch'])==str:
             qemu_arch = configData['qemu arch']
         if configData.__contains__('initrd') and type(configData['initrd'])==str:
             initrd = configData['initrd']
+        if configData.__contains__('useScreen') and configData['useScreen'] == 1:
+            screen = True
         if configData.__contains__('mirror') and type(configData['mirror']) == str:
             mirror = configData['mirror']
         if configData.__contains__('tap num') and type(configData['tap num'])==int:
             for i in range(configData['tap num']):
                 tap.put('tap'+str(i))
         if configData.__contains__('workingDir') and (configData.__contains__('bios') or configData.__contains__('kernel')) and configData.__contains__('drive'):
+            if configData.__contains__('bios') and type(configData['bios']) == str:
+                bios = configData['bios']
+            if configData.__contains__('kernel') and type(configData['kernel']) == str:
+                kernel = configData['kernel']
+            if configData.__contains__('pflash') and type(configData['pflash']) == str:
+                pflash = configData['pflash']
             if type(configData['workingDir']) == str:
                 workingDir = configData['workingDir']
             else:
@@ -467,12 +332,15 @@ if __name__ == "__main__":
             qemu_option=args.qemu_option
         if args.initrd:
             initrd=args.initrd
+        if args.screen:
+            screen = True
 
         if args.w != None and (args.B != None or args.K !=None) and args.D != None:
             workingDir = args.w
             orgDrive = args.D
             bios = args.B
             kernel = args.K
+            pflash = args.U
             if args.mugenDir != None:
                 preImg = False
                 bkFile = orgDrive
@@ -503,10 +371,10 @@ if __name__ == "__main__":
                 exit(-1)
 
         preVM = QemuVM(id=1,user=user,password=password,
-                       kernel=kernel,bios=bios,initrd=initrd,
+                       kernel=kernel,bios=bios,initrd=initrd,pflash=pflash,
                        vcpu=coreNum,memory=memSize,
                        path=mugenPath,workingDir=workingDir,bkfile=bkFile,restore=False,
-                       qemuOption=qemu_option,arch=qemu_arch,sharedir='shared')
+                       qemuOption=qemu_option,arch=qemu_arch,sharedir='shared',screen=screen)
         preVM.start()
         preVM.waitReady()
         if preImg == True:
@@ -572,15 +440,15 @@ if __name__ == "__main__":
         for i in range(threadNum):
             qemuVM.append(QemuVM(id=i , vcpu=coreNum , memory=memSize,
                                  user=user , password=password,
-                                 kernel=kernel , bios=bios, initrd=initrd, 
+                                 kernel=kernel , bios=bios, initrd=initrd, pflash=pflash,
                                  arch=qemu_arch , qemuOption=qemu_option,
                                  workingDir=workingDir , bkfile=bkFile , path=mugenPath,
-                                 sharedir='shared'))   
+                                 sharedir='shared' , screen = screen))   
         targetQueue = Queue()
         for target in test_target.test_list:
             jsondata = json.loads(open('suite2cases/'+target+'.json','r').read())
             if len(jsondata['cases']) != 0:
-                targetQueue.put((target , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 1)))
+                targetQueue.put((target , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0)))
 
         dispathcers = []
         for i in range(threadNum):
