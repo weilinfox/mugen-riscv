@@ -6,22 +6,24 @@ from libs.locallibs import ssh_cmd , mugen_log , sftp
 
 class QemuVM(object):
     def __init__(self, vcpu,memory,workingDir,bkfile,
-                 kernel,bios,initrd,arch='riscv64',
+                 kernel,bios,initrd,pflash,arch='riscv64',
                  id=1,user='root',password='openEuler12#$',
                  path='/root/mugen' , restore=True,sharedir='',
-                 qemuOption=''):
+                 qemuOption='' , screen=False):
         self.id = id
         self.port , self.ip , self.user , self.password  = None , '127.0.0.1' , user , password
         self.vcpu , self.memory= vcpu , memory
         self.workingDir , self.bkFile = workingDir , bkfile
-        self.kernel , self.bios , self.initrd , self.arch = kernel , bios , initrd , arch
+        self.kernel , self.bios , self.initrd , self.pflash , self.arch = kernel , bios , initrd , pflash , arch
         self.drive = 'img'+str(self.id)+'.qcow2'
         self.path = path
         self.restore = restore
-        self.mac = id+1
         self.tapls = []
         self.sharedir = sharedir
         self.qemu_option = qemuOption
+        self.screen = screen
+        if self.screen:
+            self.processname = 'mugenss'+self.id
         if workingDir[-1] != '/':
             workingDir += '/'
 
@@ -112,6 +114,10 @@ class QemuVM(object):
                 cmdlist.append(self.workingDir+self.bios)
         if self.initrd is not None:
             cmdlist.extend(['-initrd' , self.workingDir+self.initrd])
+        
+        if self.pflash is not None:
+            os.system(f'/bin/cp -rf {self.workingDir}{self.pflash} {self.workingDir}M{self.id}.fd')
+            cmdlist.extend(['-drive' , f'if=pflash,format=raw,file={self.workingDir}M{self.id}.fd'])
 
         ## specity the append option
         if self.sharedir != '' and self.arch == 'riscv64':
@@ -124,24 +130,48 @@ class QemuVM(object):
                 cmdlist.extend(["-drive", "file="+self.workingDir+"disk"+str(self.id)+'-'+str(i+1)+".qcow2,format=qcow2,if=virtio,id=hd"+str(i+1)])
 
         if tap_number > 0:
-            for i in range(tap_number-1):
-                used_tap = taplist[i]
-                cmdlist.extend(["-netdev","tap,id=net"+used_tap+",ifname="+used_tap+",script=no,downscript=no",
-                                "-device", "virtio-net-pci,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(self.mac+i+1)])
             if machine > 1:
+                tap_number -= 1
                 used_tap = taplist[-1]
+                mac = int(used_tap.strip('tap'))
                 cmdlist.extend(["-netdev", "tap,id=net"+used_tap+",ifname="+used_tap+",script=no,downscript=no",
-                                "-device", "virtio-net-pci,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(self.mac)])
+                                "-device", "virtio-net-pci,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(mac+1)])
+            
+            for i in range(tap_number):
+                used_tap = taplist[i]
+                mac = int(used_tap.strip('tap'))
+                cmdlist.extend(["-netdev","tap,id=net"+used_tap+",ifname="+used_tap+",script=no,downscript=no",
+                                "-device", "virtio-net-pci,netdev=net"+used_tap+",mac=52:54:00:11:45:{:0>2d}".format(mac+1)])
+            
 
         ssh_port=self.port
         cmdlist.extend(["-netdev" , "user,id=usernet,hostfwd=tcp::"+str(ssh_port)+"-:22",
-                        "-device" , "virtio-net-pci,netdev=usernet,mac=52:54:00:11:45:{:0>2d}".format(self.mac+tap_number)])
+                        "-device" , "virtio-net-pci,netdev=usernet"])
         
         if self.qemu_option is not None:
             cmdlist.append(self.qemu_option)
             
         cmd = " ".join(cmdlist)
-        self.process = subprocess.Popen(args=cmd,stderr=subprocess.PIPE,stdout=subprocess.PIPE,stdin=subprocess.PIPE,encoding='utf-8',shell=True)
+
+        if self.screen:
+            if os.system("screen -ls | grep "+self.processname+" >/dev/null") == 0:
+                os.system("screen -X -S "+self.processname+" quit")
+            os.system("screen -S "+self.processname+" -d -m "+cmd)
+            time.sleep(1)
+            if os.system("screen -ls | grep "+self.processname+" >/dev/null") != 0:
+                print("Qemu process terminate unexpectedly " + cmd)
+            else:
+                print("Qemu process is running with cmdline " + cmd)
+        else:
+            self.process = subprocess.Popen(args=cmd,stderr=subprocess.PIPE,stdout=subprocess.PIPE,stdin=subprocess.PIPE,encoding='utf-8',shell=True)
+            time.sleep(1)
+            ret = self.process.poll()
+            if ret is not None:
+                print("Qemu process terminate unexpectedly " + str(ret))
+                print(self.process.communicate())
+            else:
+                print("Qemu process is running with cmdline " + cmd)
+
 
     def sharedReady(self):
         if self.sharedir != '' and self.arch == 'riscv64':
@@ -168,10 +198,10 @@ class QemuVM(object):
         print(self.ssh_exec('dnf install lshw -y')[1])
         nic = self.ssh_exec("lshw -class network | grep -A 5 'description: Ethernet interface' | grep 'logical name:' | awk '{print $NF}' | grep -v 'lo'")[1].split("\n")[0]
         print("config the machine "+str(self.id)+" nic name "+nic)
-        print(self.ssh_exec("nmcli c a type Ethernet con-name "+nic+" ifname "+nic , timeout=300)[1])
-        print(self.ssh_exec("nmcli c m "+nic+" ipv4.address "+self.tapip+"/24" , timeout=300)[1])
-        print(self.ssh_exec("nmcli c m "+nic+" ipv4.gateway "+br_ip , timeout=300)[1])
-        print(self.ssh_exec("nmcli c m "+nic+" ipv4.method manual",timeout=300)[1])
+        print(self.ssh_exec(f"nmcli c a type Ethernet con-name {nic} ifname {nic} ip4 {self.tapip}/24" , timeout=300)[1])
+        # print(self.ssh_exec("nmcli c m "+nic+" ipv4.address "+self.tapip+"/24" , timeout=300)[1])
+        # print(self.ssh_exec("nmcli c m "+nic+" ipv4.gateway "+br_ip , timeout=300)[1])
+        # print(self.ssh_exec("nmcli c m "+nic+" ipv4.method manual",timeout=300)[1])
         print(self.ssh_exec("nmcli c up "+nic , timeout=300)[1])
         print(self.ssh_exec("rm -rf "+self.path+"/conf",timeout=300)[1])
         print(self.ssh_exec('bash '+self.path+'/mugen.sh -c --user root --password openEuler12#$ --ip '+self.tapip+' 2>&1',timeout=300)[1])
@@ -196,17 +226,23 @@ class QemuVM(object):
         return False
 
     def waitPoweroff(self):
-        self.process.wait()
-        while os.system('netstat -anp 2>&1 | grep '+str(self.port)+' > /dev/null') == 0:
-            time.sleep(1)
+        if self.screen:
+            while os.system("screen -ls | grep "+self.name+" >/dev/null") == 0:
+                time.sleep(1)
+        else:
+            wait_time = 0
+            while self.process.poll() is None:
+                wait_time += 1
+                time.sleep(1)
+                if wait_time > 60:
+                    self.process.terminate()
+            while os.system('netstat -anp 2>&1 | grep '+str(self.port)+' > /dev/null') == 0:
+                time.sleep(1)
 
     def destroy(self):
-        if self.isBroken():
-            getpid = subprocess.Popen('netstat -anp 2>&1 | grep '+str(self.port),shell=True,stdout=subprocess.PIPE)
-            rawpid = getpid.stdout.read()
-            pid = rawpid.split()[-1].split('/')[0]
+        if self.isBroken() and not self.screen:
             try:
-                os.kill(int(pid) , signal.SIGKILL)
+                self.process.terminate()
             except:
                 mugen_log.logging('ERROR' , 'kill '+pid+' false')
         else:
@@ -216,3 +252,5 @@ class QemuVM(object):
         os.system('rm -f '+self.workingDir+'disk'+str(self.id)+'-*')
         if self.sharedir != '':
             os.system('rm -rf '+self.workingDir+self.sharedir+str(self.id))
+        if self.pflash is not None:
+            os.system(f"rm -f {self.workingDir}M{self.id}.fd")

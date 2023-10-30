@@ -4,12 +4,14 @@ import argparse
 from socket import timeout
 import time
 import paramiko
-from mugen_riscv import TestEnv,TestTarget
+from libs.locallibs.mugen_riscv import TestEnv,TestTarget
 from queue import Queue
 from libs.locallibs import sftp,ssh_cmd,mugen_log
 from threading import Thread
 import json
 from qemuVM import QemuVM
+from combination_parser import combination
+
 
 def lstat(qemuVM:QemuVM,remotepath,timeout=5):
     conn = paramiko.SSHClient()
@@ -43,9 +45,16 @@ def copydown(copydir , copyfile='' , localdir = '.',timeout=5) -> bool :
 
 def runTest(qemuVM:QemuVM , testsuite , runArgs):
     if not qemuVM.isBroken():
+        suite_name = None
+        if testsuite.endswith('.json'):
+            suite_name = '_'.join(testsuite.split('_')[:-1])
+            qemuVM.sftp_put(qemuVM.workingDir+'splited_json/'+suite_name , testsuite , qemuVM.path)
+            runArgs += f' -c {testsuite}'
+        else:
+            runArgs += '-l list_temp'
         print(qemuVM.ssh_exec('cd '+qemuVM.path+' ; \
                                echo \''+testsuite+'\' > list_temp ; \
-                               python3 mugen_riscv.py -l list_temp '+runArgs,timeout=60)[1])
+                               bash mugen_riscv.sh '+runArgs,timeout=60)[1])
         if not copydown(qemuVM.workingDir+qemuVM.sharedir+'/logs_failed' , '' , qemuVM.workingDir):
             if lstat(qemuVM,qemuVM.path+'/logs_failed') is not None:
                 qemuVM.sftp_get(qemuVM.path+'/logs_failed','',qemuVM.workingDir)
@@ -57,6 +66,16 @@ def runTest(qemuVM:QemuVM , testsuite , runArgs):
                 qemuVM.sftp_get(qemuVM.path+'/suite2cases_out','',qemuVM.workingDir)
         if not copydown(qemuVM.workingDir+qemuVM.sharedir , 'exec.log' , qemuVM.workingDir+'exec_log/'+testsuite):
             qemuVM.sftp_get(qemuVM.path,'exec.log',qemuVM.workingDir+'exec_log/'+testsuite)
+        if suite_name is not None and os.path.exists(qemuVM.workingDir+'logs/'+suite_name+'_0'):
+            if not os.path.exists(f'{qemuVM.workingDir}logs/{suite_name}'):
+                os.makedirs(f'{qemuVM.workingDir}logs/{suite_name}')
+            os.system(f'/bin/cp -rf {qemuVM.workingDir}logs/{suite_name}_0/* {qemuVM.workingDir}logs/{suite_name}')
+            os.system(f'rm -rf {qemuVM.workingDir}logs/{suite_name}_0 ')
+        checkName = suite_name if suite_name is not None else testsuite
+        assert os.path.exists(f'{qemuVM.workingDir}logs/{checkName}')
+        if suite_name is not None:
+            os.system(f'rm -rf {qemuVM.workingDir}splited_json/{suite_name}/{testsuite}')
+
         
 
 class Dispatcher(Thread):
@@ -118,7 +137,12 @@ class Dispatcher(Thread):
                 try:
                     runTest(self.qemuVM , target[0] , self.runArg)
                 except:
-                    mugen_log.logging("ERROR" , "run test "+target[0]+" false")
+                    target[4] += 1
+                    mugen_log.logging("ERROR" , f"run test {target[0]} false with {target[4]} times")
+                    if target[4] > 3:
+                        mugen_log.logging("ERROR" , f"run test {target[0]} fail")
+                    else:
+                        self.targetQueue.put(target)
                 self.qemuVM.destroy()
                 self.qemuVM.waitPoweroff()
                 while len(self.qemuVM.tapls) > 0:
@@ -445,10 +469,29 @@ if __name__ == "__main__":
                                  workingDir=workingDir , bkfile=bkFile , path=mugenPath,
                                  sharedir='shared' , screen = screen))   
         targetQueue = Queue()
+        combinations = combination()
         for target in test_target.test_list:
             jsondata = json.loads(open('suite2cases/'+target+'.json','r').read())
-            if len(jsondata['cases']) != 0:
-                targetQueue.put((target , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0)))
+            caseNum = len(jsondata['cases'])
+            if caseNum != 0:
+                if caseNum > 20:
+                    count , id = 0 , 0
+                    os.system(f'ls {workingDir}splited_json/{target} || mkdir -p {workingDir}splited_json/{target}')
+                    target_path = f'{workingDir}splited_json/{target}'
+                    for case in jsondata['cases']:
+                        combinations.add_case(target , case['name'])
+                        count += 1
+                        if count == 20:
+                            combinations.export_one_json(target , target_path , id)
+                            targetQueue.put([target+'_'+str(id)+'.json' , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
+                            id += 1
+                            count = 0
+                            combinations.clear_one_testsuite(target)
+                    combinations.export_one_json(target , target_path , id)
+                    combinations.clear_one_testsuite(target)
+                    targetQueue.put([target+'_'+str(id)+'.json' , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
+                else:
+                    targetQueue.put([target , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
 
         dispathcers = []
         for i in range(threadNum):
