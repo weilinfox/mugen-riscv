@@ -51,7 +51,7 @@ def runTest(qemuVM:QemuVM , testsuite , runArgs):
             qemuVM.sftp_put(qemuVM.workingDir+'splited_json/'+suite_name , testsuite , qemuVM.path)
             runArgs += f' -c {testsuite}'
         else:
-            runArgs += '-l list_temp'
+            runArgs += ' -l list_temp'
         print(qemuVM.ssh_exec('cd '+qemuVM.path+' ; \
                                echo \''+testsuite+'\' > list_temp ; \
                                bash mugen_riscv.sh '+runArgs,timeout=60)[1])
