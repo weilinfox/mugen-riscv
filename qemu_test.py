@@ -7,7 +7,7 @@ import time
 import paramiko
 from mugen_riscv import TestEnv,TestTarget
 from queue import Queue
-from libs.locallibs import sftp,ssh_cmd
+from libs.locallibs import sftp,ssh_cmd,mugen_log
 from threading import Thread
 import threading
 import subprocess
@@ -21,7 +21,7 @@ def ssh_exec(qemuVM,cmd,timeout=5):
         exitcode,output = ssh_cmd.pssh_cmd(conn,cmd)
         ssh_cmd.pssh_close(conn)
     except :
-        print("ssh execute "+cmd+" failed")
+        mugen_log.logging("error" , "ssh execute "+cmd+" failed")
         exitcode , output = None , None
     return exitcode,output
 
@@ -69,6 +69,19 @@ def findAvalPort(num=1):
 
     return port_list
 
+def copydown(qemuVM , copydir , copyfile='' , localdir = '.',timeout=5) -> bool :
+    if copyfile == '':
+        target = qemuVM.workingDir+copydir
+    else:
+        target = os.path.join(qemuVM.workingDir+copydir,copyfile)
+    os.system('ls '+localdir+' || mkdir '+localdir)
+    t_end = time.time() + timeout
+    while time.time() < t_end:
+        if os.path.exists(target):
+            mugen_log.logging("info" , "start to copy "+target+' to '+localdir)
+            os.system('/bin/cp -rf '+target+' '+localdir)
+            return True
+    return False
 
 class Dispatcher(Thread):
     def __init__(self,qemuVM,targetQueue,tapQueue,br_ip,step,initTarget=None):
@@ -93,6 +106,7 @@ class Dispatcher(Thread):
                             self.targetQueue.put(self.initTarget)
                         else:
                             self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3]+1,taplist=[self.tapQueue.get() for i in range(self.initTarget[3]+1)])
+                            self.qemuVM.sharedReady()
                             self.qemuVM.waitReady()
                             for i in range(1 , self.initTarget[2]):
                                 self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
@@ -127,6 +141,7 @@ class Dispatcher(Thread):
                             self.targetQueue.put(self.initTarget)
                         else:
                             self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=1,taplist=[self.tapQueue.get()])
+                            self.qemuVM.sharedReady()
                             self.qemuVM.waitReady()
                             ports = findAvalPort(self.initTarget[2]-1)
                             print(ports)
@@ -164,6 +179,7 @@ class Dispatcher(Thread):
                             self.targetQueue.put(self.initTarget)
                         else:
                             self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3],taplist=[self.tapQueue.get() for i in range(tapnum)])
+                            self.qemuVM.sharedReady()
                             self.qemuVM.waitReady()
                             try:
                                 self.qemuVM.runTest(self.initTarget[0])
@@ -176,6 +192,7 @@ class Dispatcher(Thread):
                                 self.tapQueue.put(self.qemuVM.tapls.pop())
                     else:
                         self.qemuVM.start(disk=self.initTarget[1])
+                        self.qemuVM.sharedReady()
                         self.qemuVM.waitReady()
                         try:
                             self.qemuVM.runTest(self.initTarget[0])
@@ -198,6 +215,7 @@ class Dispatcher(Thread):
                                 self.targetQueue.put(target)
                             else:
                                 self.qemuVM.start(disk=target[1],machine=target[2],tap_number=target[3]+1,taplist=[self.tapQueue.get() for i in range(target[3]+1)])
+                                self.qemuVM.sharedReady()
                                 self.qemuVM.waitReady()
                                 ports = findAvalPort(target[2]-1)
                                 print(ports)
@@ -233,6 +251,7 @@ class Dispatcher(Thread):
                                 self.targetQueue.put(target)
                             else:
                                 self.qemuVM.start(disk=target[1],machine=target[2],tap_number=1,taplist=[self.tapQueue.get()])
+                                self.qemuVM.sharedReady()
                                 self.qemuVM.waitReady()
                                 for i in range(1 , target[2]):
                                     self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
@@ -267,6 +286,7 @@ class Dispatcher(Thread):
                                 self.targetQueue.put(target)
                             else:
                                 self.qemuVM.start(disk=target[1],machine=target[2],tap_number=target[3],taplist=[self.tapQueue.get() for i in range(tapnum)])
+                                self.qemuVM.sharedReady()
                                 self.qemuVM.waitReady()
                                 try:
                                     self.qemuVM.runTest(target[0])
@@ -279,6 +299,7 @@ class Dispatcher(Thread):
                                     self.tapQueue.put(self.qemuVM.tapls.pop())
                         else:
                             self.qemuVM.start(target[1])
+                            self.qemuVM.sharedReady()
                             self.qemuVM.waitReady()
                             try:
                                 self.qemuVM.runTest(target[0])
@@ -290,7 +311,7 @@ class Dispatcher(Thread):
 
 class QemuVM(object):
     def __init__(self, arch, vcpu, memory, workingDir, bkfile, kernel, kparms, initrd, bios, pflash, screen, id=1, port=12055, user='root',password='openEuler12#$',
-                  path='/root/GitRepo/mugen-riscv' , restore=True, runArgs=''):
+                  path='/root/GitRepo/mugen-riscv' , restore=True, runArgs='',output=''):
         self.arch = arch
         self.id = id
         self.port , self.ip , self.user , self.password  = port , '127.0.0.1' , user , password
@@ -304,6 +325,7 @@ class QemuVM(object):
         self.mac = id+1
         self.tapls = []
         self.screen = screen
+        self.output = output
         self.name = "mugenss"+str(self.id)
         if self.workingDir[-1] != '/':
             self.workingDir += '/'
@@ -388,6 +410,10 @@ class QemuVM(object):
             cmd += "-device virtio-rng,rng=rng0 \
                    -device virtio-blk,drive=hd0 "
 
+        if self.output != '':
+            shared_path=self.workingDir+self.output+str(self.id)
+            cmd += "-virtfs local,id=test,path="+shared_path+",security_model=none,mount_tag=test "
+
         if disk > 1:
             for i in range(1 ,disk):
                 cmd += "-drive file=" + self.workingDir + "disk" + str(self.id) + '-' + str(i) + ".qcow2,format=qcow2,id=hd" + str(i) + ",if=none -device virtio-blk-pci,drive=hd" + str(i) + " "
@@ -423,6 +449,12 @@ class QemuVM(object):
             else:
                 print("Qemu process is running with cmdline " + cmd)
 
+    def sharedReady(self):
+        if self.output != '':
+            while not os.path.exists(self.workingDir+self.output+str(self.id)+'/shared_ready'):
+                time.sleep(5)
+            os.system('rm -rf '+self.workingDir+self.output+'/shared_ready')
+
     def waitReady(self):
         conn = 519
         while conn == 519:
@@ -453,14 +485,18 @@ class QemuVM(object):
             
 
     def runTest(self,testsuite):
-        print(ssh_exec(self,'cd '+self.path+' \n echo \''+testsuite+'\' > list_temp \n python3 mugen_riscv.py -l list_temp '+self.runArgs,timeout=60)[1])
-        if lstat(self,self.path+'/logs_failed') is not None:
-            sftp_get(self,self.path+'/logs_failed','',self.workingDir)
-        if lstat(self,self.path+'/logs') is not None:
-            sftp_get(self,self.path+'/logs','',self.workingDir)
-        if lstat(self , self.path+'/suite2cases_out') is not None:
-            sftp_get(self,self.path+'/suite2cases_out','',self.workingDir)
-        sftp_get(self,self.path,'exec.log',self.workingDir+'exec_log/'+testsuite)
+        print(ssh_exec(self,'cd '+self.path+' \n echo \''+testsuite+'\' > list_temp \n python3 mugen_riscv.py -l list_temp '+self.runArgs+' \n poweroff',timeout=60)[1])
+        if not copydown(self , self.workingDir+self.output+'/logs_failed' , '' , self.workingDir):
+            if lstat(self,self.path+'/logs_failed') is not None:
+                sftp_get(self,self.path+'/logs_failed','',self.workingDir)
+        if not copydown(self , self.workingDir+self.output+'/logs' , '' , self.workingDir):
+            if lstat(self,self.path+'/logs') is not None:
+                sftp_get(self,self.path+'/logs','',self.workingDir)
+        if not copydown(self , self.workingDir+self.output+'/suite2cases_out' , '' , self.workingDir):
+            if lstat(self,self.path+'/suite2cases_out') is not None:
+                sftp_get(self,self.path+'/suite2cases_out','',self.workingDir)
+        if not copydown(self , self.workingDir+self.output+'/exec.log' , '' , self.workingDir+'exec_log/'+testsuite):
+            sftp_get(self,self.path,'/exec.log',self.workingDir+'exec_log/'+testsuite)
 
     def isBroken(self):
         conn = 519
@@ -531,7 +567,7 @@ if __name__ == "__main__":
     # set default values
     threadNum = 1
     coreNum , memSize = 4 , 4
-    runningArg = ''
+    runningArg = ' -o /root/shared'
     mugenNative , generateJson , preImg , genList = False , False , False , False
     list_file , workingDir , bkFile , orgDrive , mugenPath = None , None , None , None , None
     arch = 'riscv64'
@@ -754,6 +790,13 @@ if __name__ == "__main__":
                 os.system('rm -f ./temp.txt')
             finally:
                 ssh_exec(preVM , 'rm -f /root/temp.txt')
+            file=ssh_exec(preVM , "if test -f /etc/rc.local;then echo '/etc/rc.local'; elif test -f /etc/rc.d/rc.local; then echo '/etc/rc.d/rc.local'; else ls /etc/rc.d || mkdir /etc/rc.d; touch /etc/rc.d/rc.local; fi")[1]
+            ssh_exec(preVM , 'echo "ls /root/shared || mkdir /root/shared" >> '+file)
+            ssh_exec(preVM , 'echo "rm -rf /root/shared/*" >> '+file)
+            ssh_exec(preVM , 'echo "mount -t 9p -o trans=virtio,access=any test /root/shared" >> '+file)
+            ssh_exec(preVM , 'echo "chmod 1777 /root/shared" >> '+file)
+            ssh_exec(preVM , 'echo "touch /root/shared/shared_ready" >> '+file)
+            ssh_exec(preVM , 'chmod a+x '+file)
 
         if genList is True:
             ssh_exec(preVM,'dnf list | grep -E \'riscv64|noarch\' > pkgs.txt',timeout=120)
@@ -793,7 +836,7 @@ if __name__ == "__main__":
                                  user=user , password=password,
                                  arch=arch, initrd=initrd, kernel=kernel, kparms=kparms, bios=bios, pflash=pflash,
                                  workingDir=workingDir , bkfile=bkFile , path=mugenPath, screen=screen,
-                                 runArgs=runningArg))   
+                                 runArgs=runningArg , output='shared'))
         targetQueue = Queue()
         for target in test_target.test_list:
             jsondata = json.loads(open('suite2cases/'+target+'.json','r').read())
