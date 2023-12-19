@@ -412,6 +412,9 @@ class QemuVM(object):
 
         if self.output != '':
             shared_path=self.workingDir+self.output+str(self.id)
+            if os.path.exists(shared_path):
+                os.system('rm -rf '+shared_path)
+            os.system('mkdir '+shared_path)
             cmd += "-virtfs local,id=test,path="+shared_path+",security_model=none,mount_tag=test "
 
         if disk > 1:
