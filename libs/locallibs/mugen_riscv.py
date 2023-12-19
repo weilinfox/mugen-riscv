@@ -4,6 +4,13 @@ import sys
 import json
 import argparse
 import re
+import combination
+import mugen_log
+
+OET_PATH = os.environ.get("OET_PATH")
+if OET_PATH is None:
+    mugen_log.logging("ERROR", "环境变量：OET_PATH不存在，请检查mugen框架.")
+    sys.exit(1)
 
 def LogInfo(log_content=""):
     print("INFO:  "+log_content)
@@ -19,7 +26,7 @@ class TestEnv():
 
     def __init__(self):
         self.is_cleared = 0
-        self.suite_cases_path = "./suite2cases/"
+        self.suite_cases_path = f"{OET_PATH}/suite2cases/"
         self.suite_list = os.listdir(self.suite_cases_path)
         self.suite_list_mugen = []
         self.suite_list_riscv = []
@@ -48,9 +55,9 @@ class TestEnv():
             print(testsuite)
 
     def ClearEnv(self):
-        os.system("rm -rf ./results/*")
-        os.system("rm -f ./exec.log")
-        if "logs_failed" not in os.listdir("."):
+        os.system(f"rm -rf {OET_PATH}/results/*")
+        os.system(f"rm -f {OET_PATH}/exec.log")
+        if "logs_failed" not in os.listdir(OET_PATH):
             os.system("mkdir logs_failed")
         self.is_cleared = 1
 
@@ -92,32 +99,21 @@ class TestTarget():
     Test targets
     """
 
-    def __init__(self,list_file_name=None):
+    def __init__(self,test_list=[]):
         self.is_checked = 0
         self.is_tested = 0
-        self.test_list = []
+        self.test_list = test_list
         self.unaval_test = []
 
         self.success_test_num = []
         self.failed_test_num = []
-
-        if list_file_name is not None:
-            list_file = open(list_file_name,'r')
-            raw = list_file.read()
-            self.test_list = raw.split(sep="\n")
-            list_file.close()
-
-            self.test_list = [x.strip() for x in self.test_list if x.strip()!='']  #Remove empty elements
-            self.test_list = [x.replace("-riscv","") for x in self.test_list]      #Remove -riscv suffix
-        else:
-            self.test_list = []
 
     def PrintTargetNum(self):
         print("total test targets num = "+str(len(self.test_list)))
 
     def CheckTargets(self,suite_list_mugen,suite_list_riscv,mugen_native = False,qemu_mode=False):
         if not qemu_mode:
-            conf_path = "./conf/env.json"
+            conf_path = f"{OET_PATH}/conf/env.json"
             if not os.path.exists(conf_path):
                 print("环境配置文件不存在，请先配置环境信息.")
                 sys.exit(1)
@@ -164,7 +160,7 @@ class TestTarget():
             test_res = []
             for test_target in self.test_list :
                 print("Start to test target: "+test_target)
-                json_file = open("suite2cases/"+test_target+".json",'r')
+                json_file = open(f"{OET_PATH}/suite2cases/{test_target}.json",'r')
                 json_raw = json_file.read()
                 json_data = json.loads(json_raw)
                 temp_failed = []
@@ -184,12 +180,17 @@ class TestTarget():
                         os.system("sudo bash mugen.sh -f "+test_target+" -r "+testcase+" -x 2>&1 | tee -a exec.log")
                     else:
                         os.system("sudo bash mugen.sh -f "+test_target+" -r "+testcase+" 2>&1 | tee -a exec.log")
-                    for log in  os.listdir('logs/'+test_target+'/'+testcase):
-                        with open('logs/'+test_target+'/'+testcase+'/'+log, "r", encoding='utf-8', errors='ignore') as log_data:
-                            log_found = re.search(r'See "systemctl status (.*)" and "journalctl -xe(.*)" for details.' , log_data.read())
-                            if log_found is not None:
-                                os.system("sudo journalctl -xe --no-pager > logs/"+test_target+'/'+testcase+"/journelctl_for_"+log)
-                                os.system("sudo systemctl status "+log_found.group(1)+" --no-pager > logs/"+test_target+'/'+testcase+"/systemctl_for_"+log)
+
+                    if os.path.exists('./logs_failed/'+test_target+'/'+testcase):
+                        try:
+                            for log in  os.listdir('logs_failed/'+test_target+'/'+testcase):
+                                with open('logs/'+test_target+'/'+testcase+'/'+log , "r" , encoding='ISO-8859-1',errors='ignore') as log_data:
+                                    log_found = re.search(r'See "systemctl status (.*)" and "journalctl -xe(.*)" for details.' , log_data.read())
+                                    if log_found is not None:
+                                        os.system("sudo journalctl -xe --no-pager > logs/"+test_target+'/'+testcase+"/journelctl_for_"+log)
+                                        os.system("sudo systemctl status "+log_found.group(1)+" --no-pager > logs/"+test_target+'/'+testcase+"/systemctl_for_"+log)
+                        except:
+                                LogError('can not detect the systemd failure')
 
                     if(os.system("ls results/"+test_target+"/failed/"+testcase+" &> /dev/null") == 0):
                         failed_num += 1
@@ -250,6 +251,7 @@ if __name__ == "__main__":
     parser.add_argument('-a','--analyze',action='store_true',help='Analyze missing testcases')
     parser.add_argument('-g','--generate',action='store_true',help='Generate testsuite json after running test')
     parser.add_argument('-f',metavar='test_suite',help='Specify testsuite',dest='test_suite',default=None)
+    parser.add_argument('-c','--combination',type=str,default=None,help='Specity test combination json')
     parser.add_argument('-o','--output_dir',type=str,default='',help='Specity the dir to store the logs')
     parser.add_argument('-x',action='store_true',help='-x parameter')
     parser.add_argument('--addDisk',action='store_true')
@@ -267,30 +269,58 @@ if __name__ == "__main__":
         else:
             test_env.AnalyzeMissingTests(None)
     else:
+        test_list = []
         if args.list_file is not None:
-            test_target = TestTarget(list_file_name=args.list_file)
-            test_target.PrintTargetNum()
-            test_target.CheckTargets(suite_list_mugen=test_env.suite_list_mugen,suite_list_riscv=test_env.suite_list_riscv,mugen_native=args.mugen)
-            test_target.PrintUnavalTargets()
-            test_target.PrintAvalTargets()
-            test_res = test_target.Run(xpara=args.x,addDisk=args.addDisk,multiMachine=args.multiMachine,addNic=args.addNic)
-            if args.generate == True:
-                gen = SuiteGenerator()
-                gen.GenJson(test_res)
+            list_file = open(args.list_file,'r')
+            raw = list_file.read()
+            test_list = raw.split(sep="\n")
+            list_file.close()
+
+            test_list = [x.strip() for x in test_list if x.strip()!='']  #Remove empty elements
+            test_list = [x.replace("-riscv","") for x in test_list]      #Remove -riscv suffix
         elif args.test_suite is not None:
-            test_target = TestTarget()
-            test_target.test_list.append(args.test_suite)
-            test_target.PrintTargetNum()
-            test_target.CheckTargets(suite_list_mugen=test_env.suite_list_mugen,suite_list_riscv=test_env.suite_list_riscv,mugen_native=args.mugen)
-            test_target.PrintUnavalTargets()
-            test_target.PrintAvalTargets()
-            test_res = test_target.Run(xpara=args.x,addDisk=args.addDisk,multiMachine=args.multiMachine,addNic=args.addNic)
-            if args.generate == True:
-                gen = SuiteGenerator()
-                gen.GenJson(test_res)
+            test_list.append(args.test_suite)
+        elif args.combination is not None:
+            with open(args.combination, "r") as f:
+                try:
+                    json_info = json.load(f)
+                except Exception as e:
+                    LogError(f'analysis {args.combination} json file fail, message {e}')
+                    exit(-1)
+            if not isinstance(json_info, dict):
+                LogError(f'{args.combination} json file forment fail')
+            if "combination" not in json_info:
+                LogInfo(f'{combination} do not have combination part, script will do noting')
+            combination_dict = combination.generate_combination_testsuit(json_info["combination"], 'riscv_')
+            test_list.extend([testcase['testsuite'] for testcases in json_info["combination"] for testcase in testcases['testcases']])
+            test_list = [test+'_0' for test in test_list]
+            new_suite2cases = combination_dict[json_info['combination'][0]['name']]
+            if os.path.exists(new_suite2cases):
+                os.system('mv ./suite2cases ./temp_suite2cases')
+                os.system(f'mv {new_suite2cases} ./suite2cases')
+            test_env = TestEnv()
+            test_env.ClearEnv()
+            test_env.PrintSuiteNum()
+        else:
+            LogError("no test suite or test list, please spacity !")
+            exit(-1)    
+        
+        test_target = TestTarget(test_list = test_list)
+        test_target.PrintTargetNum()
+        test_target.CheckTargets(suite_list_mugen=test_env.suite_list_mugen,suite_list_riscv=test_env.suite_list_riscv,mugen_native=args.mugen)
+        test_target.PrintUnavalTargets()
+        test_target.PrintAvalTargets()
+        test_res = test_target.Run(xpara=args.x,addDisk=args.addDisk,multiMachine=args.multiMachine,addNic=args.addNic)
+        if args.generate == True:
+            gen = SuiteGenerator()
+            gen.GenJson(test_res)
+        
         if args.output_dir != '':
             os.system('ls logs_failed && /bin/cp -rf logs '+args.output_dir)
             os.system('ls logs_failed && /bin/cp -rf logs_failed '+args.output_dir)
             os.system('ls suite2cases_out && /bin/cp -rf suite2cases_out '+args.output_dir)
             os.system('ls exec.log && /bin/cp -rf exec.log '+args.output_dir)
+        if args.combination is not None and os.path.exists('./temp_suite2cases'):
+            os.system('rm -rf ./suite2cases')
+            os.system('mv ./temp_suite2cases ./suite2cases')
 

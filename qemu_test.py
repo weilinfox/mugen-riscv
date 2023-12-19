@@ -5,33 +5,16 @@ import argparse
 from socket import timeout
 import time
 import paramiko
-from mugen_riscv import TestEnv,TestTarget
+from libs.locallibs.mugen_riscv import TestEnv,TestTarget
 from queue import Queue
 from libs.locallibs import sftp,ssh_cmd,mugen_log
 from threading import Thread
-import threading
-import subprocess
 import json
+from qemuVM import QemuVM
+from combination_parser import combination
 
-def ssh_exec(qemuVM,cmd,timeout=5):
-    conn = paramiko.SSHClient()
-    conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-    try:
-        conn.connect(qemuVM.ip,qemuVM.port,qemuVM.user,qemuVM.password,timeout=timeout,allow_agent=False,look_for_keys=False)
-        exitcode,output = ssh_cmd.pssh_cmd(conn,cmd)
-        ssh_cmd.pssh_close(conn)
-    except :
-        mugen_log.logging("error" , "ssh execute "+cmd+" failed")
-        exitcode , output = None , None
-    return exitcode,output
 
-def sftp_get(qemuVM,remotedir,remotefile,localdir,timeout=5):
-    conn = paramiko.SSHClient()
-    conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-    conn.connect(qemuVM.ip,qemuVM.port,qemuVM.user,qemuVM.password,timeout=timeout,allow_agent=False,look_for_keys=False)
-    sftp.psftp_get(conn,remotedir,remotefile,localdir)
-
-def lstat(qemuVM,remotepath,timeout=5):
+def lstat(qemuVM:QemuVM,remotepath,timeout=5):
     conn = paramiko.SSHClient()
     conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
     conn.connect(qemuVM.ip,qemuVM.port,qemuVM.user,qemuVM.password,timeout=timeout,allow_agent=False,look_for_keys=False)
@@ -69,12 +52,12 @@ def findAvalPort(num=1):
 
     return port_list
 
-def copydown(qemuVM , copydir , copyfile='' , localdir = '.',timeout=5) -> bool :
+def copydown(copydir , copyfile='' , localdir = '.',timeout=5) -> bool :
     if copyfile == '':
-        target = qemuVM.workingDir+copydir
+        target = copydir
     else:
-        target = os.path.join(qemuVM.workingDir+copydir,copyfile)
-    os.system('ls '+localdir+' || mkdir '+localdir)
+        target = os.path.join(copydir,copyfile)
+    os.system('ls '+localdir+' >/dev/null || mkdir -p '+localdir)
     t_end = time.time() + timeout
     while time.time() < t_end:
         if os.path.exists(target):
@@ -83,8 +66,43 @@ def copydown(qemuVM , copydir , copyfile='' , localdir = '.',timeout=5) -> bool 
             return True
     return False
 
+def runTest(qemuVM:QemuVM , testsuite , runArgs):
+    if not qemuVM.isBroken():
+        suite_name = None
+        if testsuite.endswith('.json'):
+            suite_name = '_'.join(testsuite.split('_')[:-1])
+            qemuVM.sftp_put(qemuVM.workingDir+'splited_json/'+suite_name , testsuite , qemuVM.path)
+            runArgs += f' -c {testsuite}'
+        else:
+            runArgs += ' -l list_temp'
+        print(qemuVM.ssh_exec('cd '+qemuVM.path+' ; \
+                               echo \''+testsuite+'\' > list_temp ; \
+                               bash mugen_riscv.sh '+runArgs,timeout=60)[1])
+        if not copydown(qemuVM.workingDir+qemuVM.sharedir+'/logs_failed' , '' , qemuVM.workingDir):
+            if lstat(qemuVM,qemuVM.path+'/logs_failed') is not None:
+                qemuVM.sftp_get(qemuVM.path+'/logs_failed','',qemuVM.workingDir)
+        if not copydown(qemuVM.workingDir+qemuVM.sharedir+'/logs' , '' , qemuVM.workingDir):
+            if lstat(qemuVM,qemuVM.path+'/logs') is not None:
+                qemuVM.sftp_get(qemuVM.path+'/logs','',qemuVM.workingDir)
+        if not copydown(qemuVM.workingDir+qemuVM.sharedir+'/suite2cases_out' , '' , qemuVM.workingDir):
+            if lstat(qemuVM,qemuVM.path+'/suite2cases_out') is not None:
+                qemuVM.sftp_get(qemuVM.path+'/suite2cases_out','',qemuVM.workingDir)
+        if not copydown(qemuVM.workingDir+qemuVM.sharedir , 'exec.log' , qemuVM.workingDir+'exec_log/'+testsuite):
+            qemuVM.sftp_get(qemuVM.path,'exec.log',qemuVM.workingDir+'exec_log/'+testsuite)
+        if suite_name is not None and os.path.exists(qemuVM.workingDir+'logs/'+suite_name+'_0'):
+            if not os.path.exists(f'{qemuVM.workingDir}logs/{suite_name}'):
+                os.makedirs(f'{qemuVM.workingDir}logs/{suite_name}')
+            os.system(f'/bin/cp -rf {qemuVM.workingDir}logs/{suite_name}_0/* {qemuVM.workingDir}logs/{suite_name}')
+            os.system(f'rm -rf {qemuVM.workingDir}logs/{suite_name}_0 ')
+        checkName = suite_name if suite_name is not None else testsuite
+        assert os.path.exists(f'{qemuVM.workingDir}logs/{checkName}')
+        if suite_name is not None:
+            os.system(f'rm -rf {qemuVM.workingDir}splited_json/{suite_name}/{testsuite}')
+
+        
+
 class Dispatcher(Thread):
-    def __init__(self,qemuVM,targetQueue,tapQueue,br_ip,step,initTarget=None):
+    def __init__(self,qemuVM:QemuVM,targetQueue:Queue,tapQueue:Queue,br_ip,step,runArg,initTarget=None):
         super(Dispatcher,self).__init__()
         self.qemuVM = qemuVM
         self.targetQueue = targetQueue
@@ -92,445 +110,74 @@ class Dispatcher(Thread):
         self.tapQueue = tapQueue
         self.step = step
         self.br_ip = br_ip
+        self.runArg = runArg
         self.attachVM = []
 
     def run(self):
         notEmpty = True
         while notEmpty:
+            target = None
             if self.initTarget is not None:
-                tapnum = 0
-                if self.initTarget[2] > 1 and self.qemuVM.runArgs.find('multiMachine') != -1:
-                    if self.initTarget[3] > 1 and self.qemuVM.runArgs.find('addNic') != -1:
-                        tapnum = self.initTarget[2]*(self.initTarget[3]+1)
-                        if tapnum > self.tapQueue.qsize():
-                            self.targetQueue.put(self.initTarget)
-                        else:
-                            self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3]+1,taplist=[self.tapQueue.get() for i in range(self.initTarget[3]+1)])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            for i in range(1 , self.initTarget[2]):
-                                self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                            user=self.qemuVM.user , password=self.qemuVM.password,
-                                                            arch=self.qemuVM.arch, initrd=self.qemuVM.initrd,
-                                                            kernel=self.qemuVM.kernel, kparms=self.qemuVM.kparms, bios=self.qemuVM.bios, pflash=self.qemuVM.pflash,
-                                                            workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path, screen=self.qemuVM.screen,
-                                                            ))
-                                self.attachVM[i-1].start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3]+1,taplist=[self.tapQueue.get() for i in range(self.initTarget[3]+1)])
-                                self.attachVM[i-1].waitReady()
-                                self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                            self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(self.initTarget[2]-1)])
-                            try:
-                                self.qemuVM.runTest(self.initTarget[0])
-                            except:
-                                print("error "+self.initTarget[0])
-                            else:
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                            finally:
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                            while len(self.attachVM) > 0:
-                                self.attachVM[-1].destroy()
-                                self.attachVM[-1].waitPoweroff()
-                                while len(self.attachVM[-1].tapls) > 0:
-                                    self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                self.attachVM.pop()
-                    else:
-                        tapnum = self.initTarget[2]
-                        if tapnum > self.tapQueue.qsize():
-                            self.targetQueue.put(self.initTarget)
-                        else:
-                            self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=1,taplist=[self.tapQueue.get()])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            ports = findAvalPort(self.initTarget[2]-1)
-                            print(ports)
-                            for i in range(1 , self.initTarget[2]):
-                                self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                            user=self.qemuVM.user , password=self.qemuVM.password,
-                                                            arch=self.qemuVM.arch, initrd=self.qemuVM.initrd,
-                                                            kernel=self.qemuVM.kernel, kparms=self.qemuVM.kparms, bios=self.qemuVM.bios, pflash=self.qemuVM.pflash,
-                                                            workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path, screen=self.qemuVM.screen,
-                                                            ))
-                                self.attachVM[i-1].start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=1,taplist=[self.tapQueue.get()])
-                                self.attachVM[i-1].waitReady()
-                                self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                            self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(self.initTarget[2]-1)])
-                            try:
-                                self.qemuVM.runTest(self.initTarget[0])
-                            except:
-                                print("error "+self.initTarget[0])
-                            else:
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                            finally:
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                            while len(self.attachVM) > 0:
-                                self.attachVM[-1].destroy()
-                                self.attachVM[-1].waitPoweroff()
-                                while len(self.attachVM[-1].tapls) > 0:
-                                    self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                self.attachVM.pop()
-                else:
-                    if self.initTarget[3] > 1 and self.qemuVM.runArgs.find('addNic') != -1:
-                        tapnum = self.initTarget[3]
-                        if tapnum > self.tapQueue.qsize():
-                            self.targetQueue.put(self.initTarget)
-                        else:
-                            self.qemuVM.start(disk=self.initTarget[1],machine=self.initTarget[2],tap_number=self.initTarget[3],taplist=[self.tapQueue.get() for i in range(tapnum)])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            try:
-                                self.qemuVM.runTest(self.initTarget[0])
-                            except:
-                                print("error "+self.initTarget[0])
-                            else:
-                                self.qemuVM.destroy()
-                                self.qemuVM.waitPoweroff()
-                            while len(self.qemuVM.tapls) > 0:
-                                self.tapQueue.put(self.qemuVM.tapls.pop())
-                    else:
-                        self.qemuVM.start(disk=self.initTarget[1])
-                        self.qemuVM.sharedReady()
-                        self.qemuVM.waitReady()
-                        try:
-                            self.qemuVM.runTest(self.initTarget[0])
-                        except:
-                            print("error "+self.initTarget[0])
-                        else:
-                            self.qemuVM.destroy()
-                            self.qemuVM.waitPoweroff()
+                target = self.initTarget
                 self.initTarget = None
             else:
                 try:
                     target = self.targetQueue.get(block=True,timeout=2)
                 except:
-                    notEmpty = False
+                    break
+
+            tapnum , eachnum = 0 , 0
+            if target[2] > 1 and self.runArg.find('multiMachine') != -1:
+                if target[3] > 0 and self.runArg.find('addNic') != -1:
+                    tapnum = target[2]*(target[3]+1)
+                    eachnum = target[3]+1
                 else:
-                    if target[2] > 1 and self.qemuVM.runArgs.find('multiMachine') != -1:
-                        if target[3] > 1 and self.qemuVM.runArgs.find('addNic') != -1:
-                            tapnum = target[2]*(target[3]+1)
-                            if tapnum > self.tapQueue.qsize():
-                                self.targetQueue.put(target)
-                            else:
-                                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=target[3]+1,taplist=[self.tapQueue.get() for i in range(target[3]+1)])
-                                self.qemuVM.sharedReady()
-                                self.qemuVM.waitReady()
-                                ports = findAvalPort(target[2]-1)
-                                print(ports)
-                                for i in range(1 , target[2]):
-                                    self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                                user=self.qemuVM.user , password=self.qemuVM.password,
-                                                                arch=self.qemuVM.arch, initrd=self.qemuVM.initrd,
-                                                                kernel=self.qemuVM.kernel, kparms=self.qemuVM.kparms, bios=self.qemuVM.bios, pflash=self.qemuVM.pflash,
-                                                                workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path, screen=self.qemuVM.screen,
-                                                                ))
-                                    self.attachVM[i-1].start(disk=target[1],machine=target[2],tap_number=target[3]+1,taplist=[self.tapQueue.get() for i in range(target[3]+1)])
-                                    self.attachVM[i-1].waitReady()
-                                    self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                                self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
-                                try:
-                                    self.qemuVM.runTest(target[0])
-                                except:
-                                    print("error "+target[0])
-                                else:
-                                    self.qemuVM.destroy()
-                                    self.qemuVM.waitPoweroff()
-                                while len(self.attachVM) > 0:
-                                    self.attachVM[-1].destroy()
-                                    self.attachVM[-1].waitPoweroff()
-                                    while len(self.attachVM[-1].tapls) > 0:
-                                        self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                    self.attachVM.pop()
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                        else:
-                            tapnum = target[2]
-                            if tapnum > self.tapQueue.qsize():
-                                self.targetQueue.put(target)
-                            else:
-                                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=1,taplist=[self.tapQueue.get()])
-                                self.qemuVM.sharedReady()
-                                self.qemuVM.waitReady()
-                                for i in range(1 , target[2]):
-                                    self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
-                                                                user=self.qemuVM.user , password=self.qemuVM.password,
-                                                                arch=self.qemuVM.arch, initrd=self.qemuVM.initrd,
-                                                                kernel=self.qemuVM.kernel, kparms=self.qemuVM.kparms, bios=self.qemuVM.bios, pflash=self.qemuVM.pflash,
-                                                                workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path, screen=self.qemuVM.screen,
-                                                                ))
-                                    self.attachVM[i-1].start(disk=target[1],machine=target[2],tap_number=1,taplist=[self.tapQueue.get()])
-                                    self.attachVM[i-1].waitReady()
-                                    self.attachVM[i-1].conftap(br_ip = self.br_ip)
-                                self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
-                                try:
-                                    self.qemuVM.runTest(target[0])
-                                except:
-                                    print("error "+target[0])
-                                else:
-                                    self.qemuVM.destroy()
-                                    self.qemuVM.waitPoweroff()
-                                while len(self.attachVM) > 0:
-                                    self.attachVM[-1].destroy()
-                                    self.attachVM[-1].waitPoweroff()
-                                    while len(self.attachVM[-1].tapls) > 0:
-                                        self.tapQueue.put(self.attachVM[-1].tapls.pop())
-                                    self.attachVM.pop()
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
+                    tapnum = target[2]
+                    eachnum = 1
+            else:
+                if target[3] > 0 and self.runArg.find('addNic') != -1:
+                    tapnum = target[3]
+                    eachnum = tapnum
+
+            if tapnum > self.tapQueue.qsize():
+                self.targetQueue.put(target)
+            else:
+                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=eachnum,taplist=[self.tapQueue.get() for i in range(eachnum)])
+                #self.qemuVM.sharedReady()
+                self.qemuVM.waitReady()
+                for i in range(1 , target[2]):
+                    self.attachVM.append(QemuVM(id= i*self.step+self.qemuVM.id, vcpu=self.qemuVM.vcpu , memory=self.qemuVM.memory,
+                                                user=self.qemuVM.user , password=self.qemuVM.password,
+                                                kernel=self.qemuVM.kernel , bios=self.qemuVM.bios ,  initrd=self.qemuVM.initrd, pflash=self.qemuVM.pflash,
+                                                arch=self.qemuVM.arch , qemuOption=self.qemuVM.qemu_option,
+                                                workingDir=self.qemuVM.workingDir , bkfile=self.qemuVM.bkFile , path=self.qemuVM.path, screen=self.qemuVM.screen
+                                                ))
+                    self.attachVM[i-1].start(disk=target[1],machine=target[2],tap_number=eachnum,taplist=[self.tapQueue.get() for i in range(eachnum)])
+                    self.attachVM[i-1].waitReady()
+                    self.attachVM[i-1].conftap(br_ip = self.br_ip)
+                if target[2] > 1 and self.runArg.find('multiMachine') != -1:
+                    self.qemuVM.conftap(br_ip = self.br_ip , tapnode = ['.'.join(self.br_ip.split(".")[:-1]+[str(self.attachVM[i].id+1)]) for i in range(target[2]-1)])
+                try:
+                    runTest(self.qemuVM , target[0] , self.runArg)
+                except:
+                    target[4] += 1
+                    mugen_log.logging("ERROR" , f"run test {target[0]} false with {target[4]} times")
+                    if target[4] > 3:
+                        mugen_log.logging("ERROR" , f"run test {target[0]} fail")
                     else:
-                        if target[3] > 1 and self.qemuVM.runArgs.find('addNic') != -1:
-                            tapnum = target[3]
-                            if tapnum > self.tapQueue.qsize():
-                                self.targetQueue.put(target)
-                            else:
-                                self.qemuVM.start(disk=target[1],machine=target[2],tap_number=target[3],taplist=[self.tapQueue.get() for i in range(tapnum)])
-                                self.qemuVM.sharedReady()
-                                self.qemuVM.waitReady()
-                                try:
-                                    self.qemuVM.runTest(target[0])
-                                except:
-                                    print("error "+target[0])
-                                else:
-                                    self.qemuVM.destroy()
-                                    self.qemuVM.waitPoweroff()
-                                while len(self.qemuVM.tapls) > 0:
-                                    self.tapQueue.put(self.qemuVM.tapls.pop())
-                        else:
-                            self.qemuVM.start(target[1])
-                            self.qemuVM.sharedReady()
-                            self.qemuVM.waitReady()
-                            try:
-                                self.qemuVM.runTest(target[0])
-                            except:
-                                print("error "+target[0])
-                            self.qemuVM.destroy()
-                            self.qemuVM.waitPoweroff()
-
-
-class QemuVM(object):
-    def __init__(self, arch, vcpu, memory, workingDir, bkfile, kernel, kparms, initrd, bios, pflash, screen, id=1, port=12055, user='root',password='openEuler12#$',
-                  path='/root/GitRepo/mugen-riscv' , restore=True, runArgs='',output=''):
-        self.arch = arch
-        self.id = id
-        self.port , self.ip , self.user , self.password  = port , '127.0.0.1' , user , password
-        self.vcpu , self.memory= vcpu , memory
-        self.workingDir , self.bkFile = workingDir , bkfile
-        self.kernel, self.kparms, self.initrd, self.bios, self.pflash = kernel, kparms, initrd, bios, pflash
-        self.drive = 'img'+str(self.id)+'.qcow2'
-        self.path = path
-        self.restore = restore
-        self.runArgs = runArgs
-        self.mac = id+1
-        self.tapls = []
-        self.screen = screen
-        self.output = output
-        self.name = "mugenss"+str(self.id)
-        if self.workingDir[-1] != '/':
-            self.workingDir += '/'
-
-    def start(self , disk=1 , machine=1 , tap_number=0 , taplist=[]):
-        self.tapls = taplist
-        if self.drive in os.listdir(self.workingDir):
-            os.system('rm -f '+self.workingDir+self.drive)
-        if self.restore:
-            cmd = 'qemu-img create -f qcow2 -F qcow2 -b '+self.workingDir+self.bkFile+' '+self.workingDir+self.drive+" >/dev/null"
-            res = os.system(cmd)
-            if res != 0:
-                print('Failed to create cow img: '+self.drive)
-                return -1
-        os.system('rm -f '+self.workingDir+'disk'+str(self.id)+'-*')
-        if disk > 1:
-            print('Append '+str(disk-1)+" disks")
-            for i in range(1 , disk):
-                cmd = 'qemu-img create -f qcow2 '+self.workingDir+"disk"+str(self.id)+'-'+str(i)+'.qcow2 500M >/dev/null'
-                res = os.system(cmd)
-                if res != 0:
-                    print('Failed to create img: disk'+str(id)+'-'+str(i))
-                    exit(-1)
-        ## Configuration
-        memory_append=self.memory * 1024
-        if self.restore:
-            drive=self.workingDir+self.drive
-        else:
-            drive=self.workingDir+self.bkFile
-        if self.kernel is not None:
-            kernelArg=" -kernel "+self.workingDir+self.kernel
-            if self.kparms is not None:
-                kernelArg += " -append '" + kparms + "'"
-            else:
-                kernelArg += " -append 'root=/dev/vda2 rw console=ttyS0 swiotlb=1 loglevel=3 systemd.default_timeout_start_sec=600 selinux=0 highres=off mem=" + \
-                         str(memory_append) + "M earlycon'"
-        else:
-            kernelArg=" "
-        if self.initrd is not None:
-            initrdArg = "-initrd " + self.workingDir + self.initrd
-        else:
-            initrdArg = " "
-        if self.bios is not None:
-            if self.bios == 'none':
-                biosArg=" -bios none"
-            else:
-                biosArg=" -bios "+self.workingDir+self.bios
-        else:
-            biosArg=" "
-        if self.pflash is not None:
-            self.npflash = self.workingDir+"/OVMF_"+str(self.id)+".fd"
-            cmd = "cp "+self.pflash+" "+self.npflash
-            os.system(cmd)
-
-        if self.arch == 'riscv64':
-            cmd = "qemu-system-riscv64 \
-                  -nographic -machine virt \
-                  -cpu rv64,sv39=on "
-        elif self.arch == 'x86_64':
-            cmd = "qemu-system-x86_64 \
-                  -nographic -machine pc -accel kvm \
-                  -cpu host "
-            if self.pflash is not None:
-                cmd += "-drive if=pflash,format=raw,file="+self.npflash+" "
-        else:
-            print('Unsupported qemu architecture ' + self.arch)
-            return
-
-        cmd += "-smp " + str(self.vcpu) + " -m " + str(self.memory) + "G \
-        -audiodev pa,id=snd0 \
-        " + kernelArg + " \
-        " + initrdArg + " \
-        " + biosArg + " \
-        -drive file=" + drive + ",format=qcow2,id=hd0,if=none \
-        -object rng-random,filename=/dev/urandom,id=rng0 \
-        -device qemu-xhci -usb -device usb-kbd -device usb-tablet -device usb-audio,audiodev=snd0 "
-
-        if self.arch == 'riscv64':
-            cmd += "-device virtio-rng-device,rng=rng0 \
-                   -device virtio-blk-device,drive=hd0 "
-        elif self.arch == 'x86_64':
-            cmd += "-device virtio-rng,rng=rng0 \
-                   -device virtio-blk,drive=hd0 "
-
-        if self.output != '':
-            shared_path=self.workingDir+self.output+str(self.id)
-            if os.path.exists(shared_path):
-                os.system('rm -rf '+shared_path)
-            os.system('mkdir '+shared_path)
-            cmd += "-virtfs local,id=test,path="+shared_path+",security_model=none,mount_tag=test "
-
-        if disk > 1:
-            for i in range(1 ,disk):
-                cmd += "-drive file=" + self.workingDir + "disk" + str(self.id) + '-' + str(i) + ".qcow2,format=qcow2,id=hd" + str(i) + ",if=none -device virtio-blk-pci,drive=hd" + str(i) + " "
-
-        if tap_number > 0:
-            for i in range(tap_number-1):
-                used_tap = taplist[i]
-                cmd += "-netdev tap,id=net" + used_tap + ",ifname=" + used_tap + ",script=no,downscript=no -device virtio-net-pci,netdev=net" + used_tap + ",mac=52:54:00:11:45:{:0>2d}".format(self.mac) + " "
-                self.mac+=1
-            if machine > 1:
-                used_tap = taplist[-1]
-                cmd += "-netdev tap,id=net" + used_tap + ",ifname=" + used_tap + ",script=no,downscript=no -device virtio-net-pci,netdev=net" + used_tap + ",mac=52:54:00:11:45:{:0>2d}".format(self.mac) + " "
-                self.mac += 1
-
-        self.port = findAvalPort(1)[0]
-        cmd += "-netdev user,id=usernet,hostfwd=tcp::" + str(self.port) + "-:22 -device virtio-net-pci,netdev=usernet,mac=52:54:00:11:45:{:0>2d}".format(self.mac)
-        if self.screen:
-            if os.system("screen -ls | grep "+self.name+" >/dev/null") == 0:
-                os.system("screen -X -S "+self.name+" quit")
-            os.system("screen -S "+self.name+" -d -m "+cmd)
-            time.sleep(1)
-            if os.system("screen -ls | grep "+self.name+" >/dev/null") != 0:
-                print("Qemu process terminate unexpectedly " + cmd)
-            else:
-                print("Qemu process is running with cmdline " + cmd)
-        else:
-            self.process = subprocess.Popen(args=cmd,stderr=subprocess.PIPE,stdout=subprocess.PIPE,stdin=subprocess.PIPE,encoding='utf-8',shell=True)
-            time.sleep(1)
-            ret = self.process.poll()
-            if ret is not None:
-                print("Qemu process terminate unexpectedly " + str(ret))
-                print(self.process.communicate())
-            else:
-                print("Qemu process is running with cmdline " + cmd)
-
-    def sharedReady(self):
-        if self.output != '':
-            while not os.path.exists(self.workingDir+self.output+str(self.id)+'/shared_ready'):
-                time.sleep(5)
-            os.system('rm -rf '+self.workingDir+self.output+'/shared_ready')
-
-    def waitReady(self):
-        conn = 519
-        while conn == 519:
-            conn = paramiko.SSHClient()
-            conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-            try:
-                time.sleep(5)
-                conn.connect(self.ip, self.port, self.user, self.password, timeout=5)
-            except Exception as e:
-                conn = 519
-        if conn != 519:
-            conn.close()
-
-    def conftap(self , br_ip , tapnode=None):
-        self.tapip = '.'.join(br_ip.split(".")[:-1]+[str(self.id+1)])
-        nic = ssh_exec(self,"lshw -class network | grep -A 5 'description: Ethernet interface' | grep 'logical name:' | awk '{print $NF}' | grep -v 'lo'")[1].split("\n")[0]
-        print("config the machine "+str(self.id)+" nic name "+nic)
-        print(ssh_exec(self , "nmcli c a type Ethernet con-name "+nic+" ifname "+nic , timeout=300)[1])
-        print(ssh_exec(self , "nmcli c m "+nic+" ipv4.address "+self.tapip+"/24" , timeout=300)[1])
-        # print(ssh_exec(self , "nmcli c m "+nic+" ipv4.gateway "+br_ip , timeout=300)[1])
-        print(ssh_exec(self , "nmcli c m "+nic+" ipv4.method manual",timeout=300)[1])
-        print(ssh_exec(self , "nmcli c up "+nic , timeout=300)[1])
-        print(ssh_exec(self , "rm -rf "+self.path+"/conf",timeout=300)[1])
-        print(ssh_exec(self , 'bash '+self.path+'/mugen.sh -c --user root --password openEuler12#$ --ip '+self.tapip+' 2>&1',timeout=300)[1])
-        if tapnode is not None:
-            for ip in tapnode:
-                print(ssh_exec(self , 'bash '+self.path+'/mugen.sh -c --user root --password openEuler12#$ --ip '+ip+' 2>&1',timeout=300)[1])
+                        self.targetQueue.put(target)
+                self.qemuVM.destroy()
+                self.qemuVM.waitPoweroff()
+                while len(self.qemuVM.tapls) > 0:
+                    self.tapQueue.put(self.qemuVM.tapls.pop())
+                while len(self.attachVM) > 0:
+                    self.attachVM[-1].destroy()
+                    self.attachVM[-1].waitPoweroff()
+                    while len(self.attachVM[-1].tapls) > 0:
+                        self.tapQueue.put(self.attachVM[-1].tapls.pop())
+                    self.attachVM.pop()
             
 
-    def runTest(self,testsuite):
-        print(ssh_exec(self,'cd '+self.path+' \n echo \''+testsuite+'\' > list_temp \n python3 mugen_riscv.py -l list_temp '+self.runArgs+' \n poweroff',timeout=60)[1])
-        if not copydown(self , self.workingDir+self.output+'/logs_failed' , '' , self.workingDir):
-            if lstat(self,self.path+'/logs_failed') is not None:
-                sftp_get(self,self.path+'/logs_failed','',self.workingDir)
-        if not copydown(self , self.workingDir+self.output+'/logs' , '' , self.workingDir):
-            if lstat(self,self.path+'/logs') is not None:
-                sftp_get(self,self.path+'/logs','',self.workingDir)
-        if not copydown(self , self.workingDir+self.output+'/suite2cases_out' , '' , self.workingDir):
-            if lstat(self,self.path+'/suite2cases_out') is not None:
-                sftp_get(self,self.path+'/suite2cases_out','',self.workingDir)
-        if not copydown(self , self.workingDir+self.output+'/exec.log' , '' , self.workingDir+'exec_log/'+testsuite):
-            sftp_get(self,self.path,'/exec.log',self.workingDir+'exec_log/'+testsuite)
-
-    def isBroken(self):
-        conn = 519
-        while conn == 519:
-            conn = paramiko.SSHClient()
-            conn.set_missing_host_key_policy(paramiko.AutoAddPolicy)
-            try:
-                conn.connect(self.ip, self.port, self.user, self.password, timeout=5)
-            except Exception as e:
-                conn = 519
-                return True
-        if conn != 519:
-            conn.close()
-        return False
-
-    def waitPoweroff(self):
-        if self.screen:
-            while os.system("screen -ls | grep "+self.name+" >/dev/null") == 0:
-                time.sleep(1)
-        else:
-            self.process.wait()
-            while os.system('netstat -anp 2>&1 | grep '+str(self.port)+' > /dev/null') == 0:
-                time.sleep(1)
-
-    def destroy(self):
-        ssh_exec(self,'poweroff')
-        if self.restore:
-            os.system('rm -f '+self.workingDir+self.drive)
-        os.system('rm -f '+self.workingDir+'disk'+str(self.id)+'-*')
-        if self.pflash is not None:
-            os.system("rm -f "+self.npflash)
 
 
 if __name__ == "__main__":
@@ -550,6 +197,7 @@ if __name__ == "__main__":
     parser.add_argument('-K',type=str,help='Specify kernel')
     parser.add_argument('-P',type=str,help='Specify kernel parameters')
     parser.add_argument('-I',type=str,help='Specify initrd')
+    parser.add_argument('-U',type=str,help='Specify UEFI pflash')
     parser.add_argument('-D',type=str,help='Specify backing file name')
     parser.add_argument('-d',type=str,help='Specify mugen installed directory',dest='mugenDir')
     parser.add_argument('-g','--generate',action='store_true',default=False,help='Generate testsuite json after running test')
@@ -559,8 +207,14 @@ if __name__ == "__main__":
     parser.add_argument('--addNic',action='store_true',default=False)
     parser.add_argument('--bridge_ip', type=str, help='Specify the network bridge ip')
     parser.add_argument('-t', type=int, default=0, help='Specify the number of generated free tap')
-    parser.add_argument('-F',type=str,help='Specify test config file')
+    parser.add_argument('--bridge_ip' , type=str , help='Specity the network bridge ip')
+    parser.add_argument('-t',type=int,default=0,help='Specity the number of generated free tap')
+    parser.add_argument('--qemu_option',type=str,default='',help='qemu option in command line')
+    parser.add_argument('-a',type=str,default='riscv64',help='specity the qemu arch')
+    parser.add_argument('-initrd',type=str,help='Specity the initrd file')
+    parser.add_argument('--mirror',type=str,default='https://gitee.com/openeuler/mugen.git',help='Specity the mugen mirror')
     parser.add_argument('--screen',action='store_true',default=False,help='Use screen command to manage qemu processes')
+    parser.add_argument('-F',type=str,help='Specify test config file')
     args = parser.parse_args()
 
     test_env = TestEnv()
@@ -570,7 +224,7 @@ if __name__ == "__main__":
     # set default values
     threadNum = 1
     coreNum , memSize = 4 , 4
-    runningArg = ' -o /root/shared'
+    runningArg = ''
     mugenNative , generateJson , preImg , genList = False , False , False , False
     list_file , workingDir , bkFile , orgDrive , mugenPath = None , None , None , None , None
     arch = 'riscv64'
@@ -579,9 +233,12 @@ if __name__ == "__main__":
     detailed = False
     user , password = "root","openEuler12#$"
     addDisk, multiMachine, addNic = False,False,False
+    screen = False
+    qemu_option , qemu_arch = '' , 'riscv64'
     bridge_ip = None
     screen = False
     tap = Queue()
+    mirror='https://gitee.com/openeuler/mugen.git'
     
 
     # parse arguments
@@ -633,7 +290,17 @@ if __name__ == "__main__":
             runningArg += " -x"
         if configData.__contains__('bridge ip'):
             bridge_ip = configData['bridge ip']
-        if configData.__contains__('tap num'):
+        if configData.__contains__('qemu option') and type(configData['qemu option'])==str:
+            qemu_option = configData['qemu option']
+        if configData.__contains__('qemu arch') and type(configData['qemu arch'])==str:
+            qemu_arch = configData['qemu arch']
+        if configData.__contains__('initrd') and type(configData['initrd'])==str:
+            initrd = configData['initrd']
+        if configData.__contains__('useScreen') and configData['useScreen'] == 1:
+            screen = True
+        if configData.__contains__('mirror') and type(configData['mirror']) == str:
+            mirror = configData['mirror']
+        if configData.__contains__('tap num') and type(configData['tap num'])==int:
             for i in range(configData['tap num']):
                 tap.put('tap'+str(i))
         if configData.__contains__('useScreen') and configData['useScreen'] == 1:
@@ -644,6 +311,12 @@ if __name__ == "__main__":
                 print("Unsupported qemu architecture " + arch)
                 exit(-1)
         if configData.__contains__('workingDir') and (configData.__contains__('bios') or configData.__contains__('kernel') or configData.__contains__('pflash')) and configData.__contains__('drive'):
+            if configData.__contains__('bios') and type(configData['bios']) == str:
+                bios = configData['bios']
+            if configData.__contains__('kernel') and type(configData['kernel']) == str:
+                kernel = configData['kernel']
+            if configData.__contains__('pflash') and type(configData['pflash']) == str:
+                pflash = configData['pflash']
             if type(configData['workingDir']) == str:
                 workingDir = configData['workingDir']
             else:
@@ -664,6 +337,7 @@ if __name__ == "__main__":
                 kparms = configData['kernelParams']
             if configData.__contains__('initrd') and type(configData['initrd']) == str:
                 initrd = configData['initrd']
+
             if configData.__contains__('mugenDir'):
                 preImg = False
                 bkFile = orgDrive
@@ -676,7 +350,7 @@ if __name__ == "__main__":
             else:
                 preImg = True
                 bkFile = img_base
-                mugenPath = "/root/GitRepo/mugen-riscv"
+                mugenPath = "/root/mugen"
                 if configData.__contains__('listFile') and type(configData['listFile']) == str:
                     list_file = configData['listFile']
                     genList = False
@@ -718,10 +392,19 @@ if __name__ == "__main__":
             runningArg += ' -g'
         if args.detailed:
             runningArg += ' -x'      
-        bridge_ip = args.bridge_ip
+        if args.bridge_ip:
+            bridge_ip = args.bridge_ip
+        if args.mirror:
+            mirror = args.mirror
         if args.t > 0:
             for i in range(args.t):
                 tap.put('tap'+str(i))
+        if args.a:
+            qemu_arch = args.a
+        if args.qemu_option:
+            qemu_option=args.qemu_option
+        if args.initrd:
+            initrd=args.initrd
         if args.screen:
             screen = True
 
@@ -734,6 +417,7 @@ if __name__ == "__main__":
             if args.P.strip() != "":
                 kparms = args.P
             initrd = args.I
+            pflash = args.U
             if args.mugenDir != None:
                 preImg = False
                 bkFile = orgDrive
@@ -746,7 +430,7 @@ if __name__ == "__main__":
             else:
                 preImg = True
                 bkFile = img_base
-                mugenPath = "/root/GitRepo/mugen-riscv"
+                mugenPath = "/root/mugen"
                 if args.list_file != None:
                     list_file = args.list_file
                     genList = False
@@ -769,41 +453,42 @@ if __name__ == "__main__":
                 print('Failed to create img-base')
                 exit(-1)
 
-        preVM = QemuVM(id=1, port=findAvalPort(1)[0], user=user, password=password, arch=arch, kernel=kernel, kparms=kparms, initrd=initrd, bios=bios, pflash=pflash,
-                       vcpu=coreNum, memory=memSize, path=mugenPath, workingDir=workingDir, bkfile=bkFile, screen=screen,
-                       restore=False)
+
+        preVM = QemuVM(id=1,user=user,password=password,
+                       kernel=kernel,bios=bios,initrd=initrd,pflash=pflash,
+                       vcpu=coreNum,memory=memSize,
+                       path=mugenPath,workingDir=workingDir,bkfile=bkFile,restore=False,
+                       qemuOption=qemu_option,arch=qemu_arch,sharedir='shared',screen=screen)
         preVM.start()
         preVM.waitReady()
         if preImg == True:
-            print(ssh_exec(preVM,'dnf install git',timeout=120)[1])
-            print(ssh_exec(preVM,'cd /root \n mkdir GitRepo \n cd GitRepo \n git clone https://github.com/brsf11/mugen-riscv.git',timeout=600)[1])
-            print(ssh_exec(preVM,'cd /root/GitRepo/mugen-riscv \n bash dep_install.sh',timeout=300)[1])
-            print(ssh_exec(preVM,'cd /root/GitRepo/mugen-riscv \n bash mugen.sh -c --port 22 --user root --password openEuler12#$ --ip 127.0.0.1 2>&1',timeout=300)[1])
-            sshd_config = ssh_exec(preVM, 'cat /etc/ssh/sshd_config' , timeout=100)[1]
-            try:
-                ssh_exec(preVM , 'echo \'test ssh\' > /root/temp.txt')
-                sftp_get(preVM , '/root' , 'temp.txt' , '.' , timeout=5)
-            except:
-                print("config ssh")
-                sshd_config = sshd_config.replace("/usr/libexec/openssh/openssh/sftp-server" , "/usr/libexec/openssh/sftp-server")
-                #print(sshd_config)
-                ssh_exec(preVM, 'echo "'+sshd_config+'" > /etc/ssh/sshd_config')
-                print(ssh_exec(preVM,"sudo systemctl restart sshd" , timeout=100)[1])
-            else:
-                os.system('rm -f ./temp.txt')
-            finally:
-                ssh_exec(preVM , 'rm -f /root/temp.txt')
-            file=ssh_exec(preVM , "if test -f /etc/rc.local;then echo '/etc/rc.local'; elif test -f /etc/rc.d/rc.local; then echo '/etc/rc.d/rc.local'; else ls /etc/rc.d || mkdir /etc/rc.d; touch /etc/rc.d/rc.local; fi")[1]
-            ssh_exec(preVM , 'echo "ls /root/shared || mkdir /root/shared" >> '+file)
-            ssh_exec(preVM , 'echo "rm -rf /root/shared/*" >> '+file)
-            ssh_exec(preVM , 'echo "mount -t 9p -o trans=virtio,access=any test /root/shared" >> '+file)
-            ssh_exec(preVM , 'echo "chmod 1777 /root/shared" >> '+file)
-            ssh_exec(preVM , 'echo "touch /root/shared/shared_ready" >> '+file)
-            ssh_exec(preVM , 'chmod a+x '+file)
+            print(preVM.ssh_exec('dnf install git -y',timeout=120)[1])
+            print(preVM.ssh_exec('cd /root \n \
+                                  git clone '+mirror,timeout=600)[1])
+            print(preVM.ssh_exec('cd /root/mugen \n \
+                                  bash dep_install.sh',timeout=300)[1])
+            print(preVM.ssh_exec('cd /root/mugen \n \
+                                  bash mugen.sh -c --port 22 --user root --password openEuler12#$ --ip 127.0.0.1 2>&1',timeout=300)[1])
+            file=preVM.ssh_exec("if test -f /etc/rc.local; then \
+                                    echo '/etc/rc.local';\
+                                 elif test -f /etc/rc.d/rc.local; then \
+                                    echo '/etc/rc.d/rc.local'; \
+                                 else \
+                                    ls /etc/rc.d || mkdir /etc/rc.d; \
+                                    touch /etc/rc.d/rc.local; \
+                                 fi")[1]
+            preVM.ssh_exec('echo "ls /root/shared || mkdir /root/shared" >> '+file)
+            preVM.ssh_exec('echo "rm -rf /root/shared/*" >> '+file)
+            preVM.ssh_exec('echo "mount -t 9p -o trans=virtio,access=any test /root/shared" >> '+file)
+            preVM.ssh_exec('echo "chmod 1777 /root/shared" >> '+file)
+            preVM.ssh_exec('echo "touch /root/shared/shared_ready" >> '+file)
+            preVM.ssh_exec('chmod a+x '+file)
+            if lstat(preVM , '/root/mugen/mugen_riscv.py') is None:
+                preVM.sftp_put('.' , 'mugen_riscv.py' , '/root/mugen')
 
         if genList is True:
-            ssh_exec(preVM,'dnf list | grep -E \'riscv64|noarch\' > pkgs.txt',timeout=120)
-            sftp_get(preVM,'.','pkgs.txt','.',timeout=5)
+            preVM.ssh_exec('dnf list | grep -E \'riscv64|noarch\' > pkgs.txt',timeout=120)
+            preVM.sftp_get('.','pkgs.txt','.',timeout=5)
             pkgfile = open('pkgs.txt','r')
             raw = pkgfile.read()
             pkgfile.close()
@@ -824,6 +509,8 @@ if __name__ == "__main__":
         preVM.destroy()
         preVM.waitPoweroff()
 
+    if qemu_arch == 'riscv64':
+        runningArg += ' -o /root/shared'
 
 
     if list_file is not None:
@@ -837,18 +524,38 @@ if __name__ == "__main__":
         for i in range(threadNum):
             qemuVM.append(QemuVM(id=i , vcpu=coreNum , memory=memSize,
                                  user=user , password=password,
-                                 arch=arch, initrd=initrd, kernel=kernel, kparms=kparms, bios=bios, pflash=pflash,
-                                 workingDir=workingDir , bkfile=bkFile , path=mugenPath, screen=screen,
-                                 runArgs=runningArg , output='shared'))
+                                 kernel=kernel , bios=bios, initrd=initrd, pflash=pflash,
+                                 arch=qemu_arch , qemuOption=qemu_option,
+                                 workingDir=workingDir , bkfile=bkFile , path=mugenPath,
+                                 sharedir='shared' , screen = screen))
         targetQueue = Queue()
+        combinations = combination()
         for target in test_target.test_list:
             jsondata = json.loads(open('suite2cases/'+target+'.json','r').read())
-            if len(jsondata['cases']) != 0:
-                targetQueue.put((target , max(jsondata.get('add disk' , [1])) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 1)))
+            caseNum = len(jsondata['cases'])
+            if caseNum != 0:
+                if caseNum > 20:
+                    count , id = 0 , 0
+                    os.system(f'ls {workingDir}splited_json/{target} || mkdir -p {workingDir}splited_json/{target}')
+                    target_path = f'{workingDir}splited_json/{target}'
+                    for case in jsondata['cases']:
+                        combinations.add_case(target , case['name'])
+                        count += 1
+                        if count == 20:
+                            combinations.export_one_json(target , target_path , id)
+                            targetQueue.put([target+'_'+str(id)+'.json' , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
+                            id += 1
+                            count = 0
+                            combinations.clear_one_testsuite(target)
+                    combinations.export_one_json(target , target_path , id)
+                    combinations.clear_one_testsuite(target)
+                    targetQueue.put([target+'_'+str(id)+'.json' , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
+                else:
+                    targetQueue.put([target , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
 
         dispathcers = []
         for i in range(threadNum):
-            dispathcers.append(Dispatcher(qemuVM=qemuVM[i] , targetQueue=targetQueue , tapQueue=tap , br_ip=bridge_ip , step = threadNum))
+            dispathcers.append(Dispatcher(qemuVM=qemuVM[i] , targetQueue=targetQueue , tapQueue=tap , br_ip=bridge_ip , step = threadNum , runArg=runningArg))
             dispathcers[i].start()
             time.sleep(2)
 
@@ -877,7 +584,7 @@ if __name__ == "__main__":
                         except:
                             isEnd = True
                         else:
-                            dispathcers[i] = Dispatcher(qemuVM = qemuVM[i],targetQueue=targetQueue,initTarget=target , tapQueue=tap , br_ip=bridge_ip , step=threadNum)
+                            dispathcers[i] = Dispatcher(qemuVM = qemuVM[i],targetQueue=targetQueue,initTarget=target , tapQueue=tap , br_ip=bridge_ip , step=threadNum , runArg=runningArg)
                             dispathcers[i].start()
             isAlive = False
             for i in range(threadNum):
