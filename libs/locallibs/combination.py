@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import argparse
-import mugen_log
+from . import mugen_log
 from shutil import copyfile
 
 SCRIPT_PATH = os.path.dirname(os.path.abspath(__file__))

@@ -4,8 +4,8 @@ import sys
 import json
 import argparse
 import re
-import combination
-import mugen_log
+from . import combination
+from . import mugen_log
 
 OET_PATH = os.environ.get("OET_PATH")
 if OET_PATH is None:
@@ -290,7 +290,7 @@ if __name__ == "__main__":
             if not isinstance(json_info, dict):
                 LogError(f'{args.combination} json file forment fail')
             if "combination" not in json_info:
-                LogInfo(f'{combination} do not have combination part, script will do noting')
+                LogInfo(f'{args.combination} do not have combination part, script will do noting')
             combination_dict = combination.generate_combination_testsuit(json_info["combination"], 'riscv_')
             test_list.extend([testcase['testsuite'] for testcases in json_info["combination"] for testcase in testcases['testcases']])
             test_list = [test+'_0' for test in test_list]
