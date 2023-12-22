@@ -92,7 +92,7 @@ class combination:
                 f.write(json.dumps(dicts , indent=4))
 
     def clear_one_testsuite(self , testsuite):
-        for testsuite1 in combination[0]['testcases']:
+        for testsuite1 in self.combinations[0]['testcases']:
             if testsuite1['testsuite'] == testsuite:
-                combination['testcases'].remove(testsuite1)
+                self.combinations[0]['testcases'].remove(testsuite1)
                 break
