@@ -5,11 +5,14 @@ import argparse
 from socket import timeout
 import time
 import paramiko
-from libs.locallibs.mugen_riscv import TestEnv,TestTarget
 from queue import Queue
-from libs.locallibs import sftp,ssh_cmd,mugen_log
 from threading import Thread
 import json
+
+os.environ['OET_PATH'] = os.path.split(os.path.realpath(__file__))[0]
+
+from libs.locallibs import sftp,ssh_cmd,mugen_log
+from libs.locallibs.mugen_riscv import TestEnv,TestTarget
 from qemuVM import QemuVM
 from combination_parser import combination
 
@@ -175,7 +178,6 @@ if __name__ == "__main__":
     parser.add_argument('-K',type=str,help='Specify kernel')
     parser.add_argument('-P',type=str,help='Specify kernel parameters')
     parser.add_argument('-I',type=str,help='Specify initrd')
-    parser.add_argument('-U',type=str,help='Specify UEFI pflash')
     parser.add_argument('-D',type=str,help='Specify backing file name')
     parser.add_argument('-d',type=str,help='Specify mugen installed directory',dest='mugenDir')
     parser.add_argument('-g','--generate',action='store_true',default=False,help='Generate testsuite json after running test')
@@ -185,8 +187,6 @@ if __name__ == "__main__":
     parser.add_argument('--addNic',action='store_true',default=False)
     parser.add_argument('--bridge_ip', type=str, help='Specify the network bridge ip')
     parser.add_argument('-t', type=int, default=0, help='Specify the number of generated free tap')
-    parser.add_argument('--bridge_ip' , type=str , help='Specity the network bridge ip')
-    parser.add_argument('-t',type=int,default=0,help='Specity the number of generated free tap')
     parser.add_argument('--qemu_option',type=str,default='',help='qemu option in command line')
     parser.add_argument('-a',type=str,default='riscv64',help='specity the qemu arch')
     parser.add_argument('-initrd',type=str,help='Specity the initrd file')
