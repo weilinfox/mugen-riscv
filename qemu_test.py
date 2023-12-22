@@ -507,7 +507,7 @@ if __name__ == "__main__":
             if caseNum != 0:
                 if caseNum > 20:
                     count , id = 0 , 0
-                    os.system(f'ls {workingDir}splited_json/{target} || mkdir -p {workingDir}splited_json/{target}')
+                    os.system(f'ls {workingDir}splited_json/{target} 2>&1 >>/dev/null || mkdir -p {workingDir}splited_json/{target}')
                     target_path = f'{workingDir}splited_json/{target}'
                     for case in jsondata['cases']:
                         combinations.add_case(target , case['name'])
