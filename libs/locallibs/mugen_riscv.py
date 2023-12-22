@@ -99,14 +99,25 @@ class TestTarget():
     Test targets
     """
 
-    def __init__(self,test_list=[]):
+    def __init__(self,list_file_name=None):
         self.is_checked = 0
         self.is_tested = 0
-        self.test_list = test_list
+        self.test_list = []
         self.unaval_test = []
 
         self.success_test_num = []
         self.failed_test_num = []
+
+        if list_file_name is not None:
+            list_file = open(list_file_name,'r')
+            raw = list_file.read()
+            self.test_list = raw.split(sep="\n")
+            list_file.close()
+
+            self.test_list = [x.strip() for x in self.test_list if x.strip()!='']  #Remove empty elements
+            self.test_list = [x.replace("-riscv","") for x in self.test_list]      #Remove -riscv suffix
+        else:
+            self.test_list = []
 
     def PrintTargetNum(self):
         print("total test targets num = "+str(len(self.test_list)))
