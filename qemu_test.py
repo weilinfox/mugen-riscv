@@ -176,7 +176,6 @@ if __name__ == "__main__":
     parser.add_argument('-B',type=str,help='Specify bios')
     parser.add_argument('-U',type=str,help='Specify UEFI pflash')
     parser.add_argument('-K',type=str,help='Specify kernel')
-    parser.add_argument('-P',type=str,help='Specify kernel parameters')
     parser.add_argument('-I',type=str,help='Specify initrd')
     parser.add_argument('-D',type=str,help='Specify backing file name')
     parser.add_argument('-d',type=str,help='Specify mugen installed directory',dest='mugenDir')
@@ -206,7 +205,7 @@ if __name__ == "__main__":
     mugenNative , generateJson , preImg , genList = False , False , False , False
     list_file , workingDir , bkFile , orgDrive , mugenPath = None , None , None , None , None
     arch = 'riscv64'
-    kernel, kparms, initrd, bios, pflash = None, None, None, None, None
+    kernel, initrd, bios, pflash = None, None, None, None
     img_base = 'img_base.qcow2'
     detailed = False
     user , password = "root","openEuler12#$"
@@ -310,8 +309,6 @@ if __name__ == "__main__":
                 pflash = configData['pflash']
             if configData.__contains__('kernel') and type(configData['kernel']) == str:
                 kernel = configData['kernel']
-            if configData.__contains__('kernelParams') and type(configData['kernelParams']) == str and configData['kernelParams'].strip() != "":
-                kparms = configData['kernelParams']
             if configData.__contains__('initrd') and type(configData['initrd']) == str:
                 initrd = configData['initrd']
 
@@ -391,10 +388,7 @@ if __name__ == "__main__":
             bios = args.B
             pflash = args.U
             kernel = args.K
-            if args.P.strip() != "":
-                kparms = args.P
             initrd = args.I
-            pflash = args.U
             if args.mugenDir != None:
                 preImg = False
                 bkFile = orgDrive

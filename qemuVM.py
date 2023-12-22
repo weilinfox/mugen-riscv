@@ -16,7 +16,7 @@ class QemuVM(object):
         self.port , self.ip , self.user , self.password  = None , '127.0.0.1' , user , password
         self.vcpu , self.memory= vcpu , memory
         self.workingDir , self.bkFile = workingDir , bkfile
-        self.kernel, self.kparms, self.initrd, self.bios, self.pflash = kernel, kparms, initrd, bios, pflash
+        self.kernel, self.initrd, self.bios, self.pflash = kernel, initrd, bios, pflash
         self.drive = 'img'+str(self.id)+'.qcow2'
         self.path = path
         self.restore = restore
