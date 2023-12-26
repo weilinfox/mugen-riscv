@@ -518,9 +518,10 @@ if __name__ == "__main__":
                             id += 1
                             count = 0
                             combinations.clear_one_testsuite(target)
-                    combinations.export_one_json(target , target_path , id)
-                    combinations.clear_one_testsuite(target)
-                    targetQueue.put([target+'_'+str(id)+'.json' , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
+                    if count > 0:
+                        combinations.export_one_json(target , target_path , id)
+                        combinations.clear_one_testsuite(target)
+                        targetQueue.put([target+'_'+str(id)+'.json' , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
                 else:
                     targetQueue.put([target , jsondata.get('add disk' , []) , jsondata.get("machine num" , 1) , jsondata.get("add network interface" , 0) , 0])
 
